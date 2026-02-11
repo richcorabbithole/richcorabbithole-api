@@ -19,17 +19,17 @@ provider:
           Action:
             - s3:GetObject
             - s3:PutObject
+          Resource: arn:aws:s3:::${self:custom.bucketName}/*
+        - Effect: Allow
+          Action:
             - s3:ListBucket
-          Resource:
-            - arn:aws:s3:::${self:custom.bucketName}
-            - arn:aws:s3:::${self:custom.bucketName}/*
+          Resource: arn:aws:s3:::${self:custom.bucketName}
         - Effect: Allow
           Action:
             - dynamodb:GetItem
             - dynamodb:PutItem
             - dynamodb:UpdateItem
             - dynamodb:Query
-            - dynamodb:Scan
           Resource: arn:aws:dynamodb:us-east-1:444739497441:table/${self:custom.tableName}
   tags:
     Project: richcorabbithole
@@ -58,8 +58,19 @@ resources:
   Resources:
     ResearchBucket:
       Type: AWS::S3::Bucket
+      DeletionPolicy: Retain
+      UpdateReplacePolicy: Retain
       Properties:
         BucketName: ${self:custom.bucketName}
+        BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: AES256
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
         Tags:
           - Key: Project
             Value: richcorabbithole
@@ -73,6 +84,7 @@ resources:
       Properties:
         DomainName: ${self:custom.domainName}
         CertificateArn: ${self:custom.certificateArn}
+        SecurityPolicy: TLS_1_2
         EndpointConfiguration:
           Types:
             - EDGE
@@ -94,9 +106,15 @@ resources:
 
     TasksTable:
       Type: AWS::DynamoDB::Table
+      DeletionPolicy: Retain
+      UpdateReplacePolicy: Retain
       Properties:
         TableName: ${self:custom.tableName}
         BillingMode: PAY_PER_REQUEST
+        SSESpecification:
+          SSEEnabled: true
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
         AttributeDefinitions:
           - AttributeName: taskId
             AttributeType: S

@@ -1,0 +1,140 @@
+name: Codex Code Review
+
+on:
+  pull_request:
+    branches: [development]
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: codex-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  codex-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check if OPENAI_API_KEY is available
+        id: check_secret
+        run: |
+          if [ -z "${{ secrets.OPENAI_API_KEY }}" ]; then
+            echo "OPENAI_API_KEY secret is NOT available to this workflow."
+            echo "This is expected for PRs from forks. Skipping Codex review."
+            echo "secret_available=false" >> $GITHUB_OUTPUT
+          else
+            echo "OPENAI_API_KEY secret is available."
+            echo "secret_available=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout PR merge commit
+        if: steps.check_secret.outputs.secret_available == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          fetch-depth: 0
+
+      - name: Fetch base and head refs
+        if: steps.check_secret.outputs.secret_available == 'true'
+        run: |
+          git fetch --no-tags origin \
+            ${{ github.event.pull_request.base.ref }} \
+            +refs/pull/${{ github.event.pull_request.number }}/head
+
+      - name: Generate diff for review
+        if: steps.check_secret.outputs.secret_available == 'true'
+        run: |
+          git diff origin/${{ github.event.pull_request.base.ref }}...HEAD > /tmp/pr-diff.txt
+          echo "Diff size: $(wc -l < /tmp/pr-diff.txt) lines"
+
+      - name: Setup Node.js
+        if: steps.check_secret.outputs.secret_available == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Codex CLI
+        if: steps.check_secret.outputs.secret_available == 'true'
+        run: npm install -g @openai/codex
+
+      - name: Run Codex review
+        if: steps.check_secret.outputs.secret_available == 'true'
+        env:
+          CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          codex exec \
+            --full-auto \
+            --skip-git-repo-check \
+            -o /tmp/review-output.md \
+            "You are reviewing a pull request for a serverless agent pipeline API.
+          The tech stack is: Serverless Framework 4, AWS Lambda (Node.js 20), DynamoDB, S3, API Gateway, AWS SDK v3.
+
+          The PR diff is in /tmp/pr-diff.txt. Read that file and review the changes for:
+
+          1. **Bugs & Logic Errors** — Incorrect logic, unhandled promise rejections, missing error handling, broken Lambda responses.
+          2. **Security** — Exposed secrets, overly permissive IAM roles, missing input validation, injection risks, insecure API Gateway config.
+          3. **Performance** — Cold start impact, unnecessary SDK imports, missing connection reuse, Lambda timeout risks, inefficient DynamoDB queries.
+          4. **Infrastructure (serverless.yml)** — Misconfigured resources, missing DeletionPolicy, overly broad permissions, missing encryption, tag inconsistencies.
+          5. **AWS Best Practices** — Error handling patterns, idempotency, structured logging, environment variable usage, secrets management.
+          6. **Code Quality** — Dead code, unclear naming, missing error handling, overly complex logic, missing tests.
+
+          Format your review as a structured markdown report with sections for each category.
+          Only include sections where you found issues. If everything looks good in a category, omit it.
+          Start with a brief summary of the PR changes and an overall assessment.
+          Be constructive and specific — reference file names and line numbers where possible."
+
+      - name: Post review comment on PR
+        if: steps.check_secret.outputs.secret_available == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const outputPath = '/tmp/review-output.md';
+
+            if (!fs.existsSync(outputPath)) {
+              console.log('No review output file found, skipping comment.');
+              return;
+            }
+
+            const message = fs.readFileSync(outputPath, 'utf8').trim();
+
+            if (!message) {
+              console.log('Review output is empty, skipping comment.');
+              return;
+            }
+
+            const header = '## 🤖 Codex Code Review\n\n';
+            const footer = '\n\n---\n*Automated review by [OpenAI Codex CLI](https://github.com/openai/codex) · triggered on PR to `development`*';
+            const body = header + message + footer;
+
+            // Check for an existing Codex review comment to update instead of duplicating
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existing = comments.find(c =>
+              c.body.includes('🤖 Codex Code Review') &&
+              c.user.login === 'github-actions[bot]'
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: body,
+              });
+              console.log(`Updated existing review comment #${existing.id}`);
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body,
+              });
+              console.log('Posted new review comment');
+            }
