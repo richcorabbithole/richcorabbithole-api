@@ -1,0 +1,117 @@
+service: richcorabbithole-api
+org: richcorabbithole
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  deploymentBucket:
+    name: richcorabbithole-api-deploys-${self:provider.stage}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - secretsmanager:GetSecretValue
+          Resource: arn:aws:secretsmanager:us-east-1:444739497441:secret:richcorabbithole/*
+        - Effect: Allow
+          Action:
+            - s3:GetObject
+            - s3:PutObject
+            - s3:ListBucket
+          Resource:
+            - arn:aws:s3:::${self:custom.bucketName}
+            - arn:aws:s3:::${self:custom.bucketName}/*
+        - Effect: Allow
+          Action:
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:Query
+            - dynamodb:Scan
+          Resource: arn:aws:dynamodb:us-east-1:444739497441:table/${self:custom.tableName}
+  tags:
+    Project: richcorabbithole
+    Environment: ${self:provider.stage}
+    ManagedBy: serverless
+
+custom:
+  stage: ${self:provider.stage}
+  bucketName: richcorabbithole-research-${self:custom.stage}
+  tableName: richcorabbithole-tasks-${self:custom.stage}
+  certificateArn: arn:aws:acm:us-east-1:444739497441:certificate/3afa4bdc-fde3-4f80-abe3-0fdcbb91ebfe
+  domainMap:
+    dev: dev-api.richcorabbithole.com
+    prod: api.richcorabbithole.com
+  domainName: ${self:custom.domainMap.${self:custom.stage}}
+
+functions:
+  hello:
+    handler: src/hello.handler
+    events:
+      - http:
+          path: /hello
+          method: get
+
+resources:
+  Resources:
+    ResearchBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:custom.bucketName}
+        Tags:
+          - Key: Project
+            Value: richcorabbithole
+          - Key: Environment
+            Value: ${self:custom.stage}
+          - Key: ManagedBy
+            Value: serverless
+
+    ApiCustomDomain:
+      Type: AWS::ApiGateway::DomainName
+      Properties:
+        DomainName: ${self:custom.domainName}
+        CertificateArn: ${self:custom.certificateArn}
+        EndpointConfiguration:
+          Types:
+            - EDGE
+        Tags:
+          - Key: Project
+            Value: richcorabbithole
+          - Key: Environment
+            Value: ${self:custom.stage}
+          - Key: ManagedBy
+            Value: serverless
+
+    ApiBasePathMapping:
+      Type: AWS::ApiGateway::BasePathMapping
+      DependsOn: ApiCustomDomain
+      Properties:
+        DomainName: ${self:custom.domainName}
+        RestApiId: !Ref ApiGatewayRestApi
+        Stage: ${self:custom.stage}
+
+    TasksTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:custom.tableName}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: taskId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: taskId
+            KeyType: HASH
+        Tags:
+          - Key: Project
+            Value: richcorabbithole
+          - Key: Environment
+            Value: ${self:custom.stage}
+          - Key: ManagedBy
+            Value: serverless
+
+  Outputs:
+    ApiGatewayDomainTarget:
+      Description: CNAME target for Cloudflare DNS
+      Value: !GetAtt ApiCustomDomain.DistributionDomainName
