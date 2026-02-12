@@ -56,7 +56,7 @@ functions:
 
   research:
     handler: src/research.handler
-    timeout: 300
+    timeout: 29
     memorySize: 1024
     environment:
       BUCKET_NAME: ${self:custom.bucketName}
@@ -66,6 +66,7 @@ functions:
       - http:
           path: /research
           method: post
+          private: true  # Requires API key for access (security)
 
 resources:
   Resources:
