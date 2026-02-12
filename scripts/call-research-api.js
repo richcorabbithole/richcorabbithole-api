@@ -140,7 +140,9 @@ async function callResearchAPI() {
     });
 
     // Parse and display response
-    console.log(`✅ Status: ${response.statusCode}\n`);
+    const isSuccess = response.statusCode >= 200 && response.statusCode < 300;
+    const statusSymbol = isSuccess ? '✅' : '❌';
+    console.log(`${statusSymbol} Status: ${response.statusCode}\n`);
     
     try {
       const result = JSON.parse(response.body);
@@ -153,6 +155,11 @@ async function callResearchAPI() {
     } catch (e) {
       console.log('📄 Response:');
       console.log(response.body);
+    }
+
+    // Exit with error code for non-2xx responses
+    if (response.statusCode >= 400) {
+      process.exit(1);
     }
 
   } catch (error) {
