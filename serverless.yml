@@ -54,6 +54,19 @@ functions:
           path: /hello
           method: get
 
+  research:
+    handler: src/research.handler
+    timeout: 300
+    memorySize: 1024
+    environment:
+      BUCKET_NAME: ${self:custom.bucketName}
+      TABLE_NAME: ${self:custom.tableName}
+      STAGE: ${self:custom.stage}
+    events:
+      - http:
+          path: /research
+          method: post
+
 resources:
   Resources:
     ResearchBucket:
