@@ -23,7 +23,7 @@ const https = require('https');
 const args = process.argv.slice(2);
 let topic = null;
 let stage = 'dev';
-let profile = process.env.AWS_PROFILE || 'richcorabbithole';
+let profile = null;
 
 // Parse named arguments
 for (let i = 0; i < args.length; i++) {
@@ -51,6 +51,11 @@ for (let i = 0; i < args.length; i++) {
   } else if (!args[i].startsWith('--') && topic === null) {
     topic = args[i];
   }
+}
+
+// Set profile from environment if not provided via flag
+if (!profile && process.env.AWS_PROFILE) {
+  profile = process.env.AWS_PROFILE;
 }
 
 // Validate topic
@@ -156,8 +161,13 @@ async function callResearchAPI() {
       console.error(`\n💡 Tip: Make sure the API is deployed to ${stage} stage`);
     } else if (error.name === 'CredentialsProviderError') {
       console.error('\n💡 Tip: Configure AWS credentials with:');
-      console.error(`   aws configure --profile ${profile}`);
-      console.error('   or set AWS_PROFILE environment variable');
+      if (profile) {
+        console.error(`   aws configure --profile ${profile}`);
+      } else {
+        console.error('   aws configure');
+        console.error('   or pass --profile <name> flag');
+        console.error('   or set AWS_PROFILE environment variable');
+      }
     }
     process.exit(1);
   }

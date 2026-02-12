@@ -1,6 +1,14 @@
 service: richcorabbithole-api
 org: richcorabbithole
 
+# Exclude CLI scripts and docs from Lambda package to reduce size and cold-start time
+package:
+  patterns:
+    - '!scripts/**'
+    - '!docs/**'
+    - '!.gitignore'
+    - '!README.md'
+
 provider:
   name: aws
   runtime: nodejs20.x
@@ -8,13 +16,6 @@ provider:
   stage: ${opt:stage, 'dev'}
   deploymentBucket:
     name: richcorabbithole-api-deploys-${self:provider.stage}
-  # Exclude CLI scripts and docs from Lambda package to reduce size
-  package:
-    patterns:
-      - '!scripts/**'
-      - '!docs/**'
-      - '!.gitignore'
-      - '!README.md'
   iam:
     role:
       statements:
