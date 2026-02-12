@@ -1,6 +1,14 @@
 service: richcorabbithole-api
 org: richcorabbithole
 
+# Exclude CLI scripts and docs from Lambda package to reduce size and cold-start time
+package:
+  patterns:
+    - '!scripts/**'
+    - '!docs/**'
+    - '!.gitignore'
+    - '!README.md'
+
 provider:
   name: aws
   runtime: nodejs20.x
@@ -53,6 +61,20 @@ functions:
       - http:
           path: /hello
           method: get
+
+  research:
+    handler: src/research.handler
+    timeout: 29
+    memorySize: 1024
+    environment:
+      BUCKET_NAME: ${self:custom.bucketName}
+      TABLE_NAME: ${self:custom.tableName}
+      STAGE: ${self:custom.stage}
+    events:
+      - http:
+          path: /research
+          method: post
+          authorizer: aws_iam  # Requires AWS IAM credentials (most secure)
 
 resources:
   Resources:
