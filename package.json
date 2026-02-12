@@ -8,13 +8,19 @@
     "deploy:prod": "serverless deploy --stage prod --aws-profile richcorabbithole",
     "remove:dev": "serverless remove --stage dev --aws-profile richcorabbithole",
     "invoke:hello": "serverless invoke -f hello --stage dev --aws-profile richcorabbithole",
+    "research": "node scripts/call-research-api.js",
     "lint": "eslint src/",
     "test": "node --test src/**/*.test.js"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.700.0",
     "@aws-sdk/client-s3": "^3.700.0",
-    "@aws-sdk/lib-dynamodb": "^3.700.0"
+    "@aws-sdk/client-sqs": "^3.700.0",
+    "@aws-sdk/credential-provider-node": "^3.700.0",
+    "@aws-sdk/lib-dynamodb": "^3.700.0",
+    "@smithy/signature-v4": "^4.2.0",
+    "@smithy/hash-node": "^3.0.0",
+    "@smithy/protocol-http": "^4.0.0"
   },
   "devDependencies": {
     "serverless": "^4.31.2"

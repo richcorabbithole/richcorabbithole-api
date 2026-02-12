@@ -66,7 +66,7 @@ functions:
       - http:
           path: /research
           method: post
-          private: true  # Requires API key for access (security)
+          authorizer: aws_iam  # Requires AWS IAM credentials (most secure)
 
 resources:
   Resources:
