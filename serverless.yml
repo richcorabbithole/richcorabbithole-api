@@ -8,6 +8,13 @@ provider:
   stage: ${opt:stage, 'dev'}
   deploymentBucket:
     name: richcorabbithole-api-deploys-${self:provider.stage}
+  # Exclude CLI scripts and docs from Lambda package to reduce size
+  package:
+    patterns:
+      - '!scripts/**'
+      - '!docs/**'
+      - '!.gitignore'
+      - '!README.md'
   iam:
     role:
       statements:

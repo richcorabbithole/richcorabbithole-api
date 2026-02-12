@@ -6,36 +6,63 @@
  * 
  * Usage:
  *   node scripts/call-research-api.js "your research topic"
- *   node scripts/call-research-api.js --topic "serverless architecture" --stage dev
+ *   node scripts/call-research-api.js --topic "serverless architecture" --stage dev --profile richcorabbithole
+ * 
+ * Environment Variables:
+ *   AWS_PROFILE=richcorabbithole (alternative to --profile flag)
  */
 
 const { SignatureV4 } = require('@smithy/signature-v4');
 const { HttpRequest } = require('@smithy/protocol-http');
 const { defaultProvider } = require('@aws-sdk/credential-provider-node');
+const { fromIni } = require('@aws-sdk/credential-provider-ini');
 const { Hash } = require('@smithy/hash-node');
 const https = require('https');
 
 // Parse command line arguments
 const args = process.argv.slice(2);
-let topic = args[0];
+let topic = null;
 let stage = 'dev';
+let profile = process.env.AWS_PROFILE || 'richcorabbithole';
 
 // Parse named arguments
 for (let i = 0; i < args.length; i++) {
-  if (args[i] === '--topic' && args[i + 1]) {
+  if (args[i] === '--topic') {
+    if (!args[i + 1] || args[i + 1].startsWith('--')) {
+      console.error('Error: --topic flag requires a value');
+      process.exit(1);
+    }
     topic = args[i + 1];
     i++;
-  } else if (args[i] === '--stage' && args[i + 1]) {
+  } else if (args[i] === '--stage') {
+    if (!args[i + 1] || args[i + 1].startsWith('--')) {
+      console.error('Error: --stage flag requires a value');
+      process.exit(1);
+    }
     stage = args[i + 1];
     i++;
-  } else if (!args[i].startsWith('--') && i === 0) {
+  } else if (args[i] === '--profile') {
+    if (!args[i + 1] || args[i + 1].startsWith('--')) {
+      console.error('Error: --profile flag requires a value');
+      process.exit(1);
+    }
+    profile = args[i + 1];
+    i++;
+  } else if (!args[i].startsWith('--') && topic === null) {
     topic = args[i];
   }
 }
 
+// Validate topic
 if (!topic) {
   console.error('Usage: node scripts/call-research-api.js "your research topic"');
-  console.error('   or: node scripts/call-research-api.js --topic "topic" --stage dev');
+  console.error('   or: node scripts/call-research-api.js --topic "topic" --stage dev --profile richcorabbithole');
+  process.exit(1);
+}
+
+if (topic.startsWith('--')) {
+  console.error('Error: Invalid topic. Topic cannot start with "--"');
+  console.error('Did you forget to provide a value for a flag?');
   process.exit(1);
 }
 
@@ -75,7 +102,7 @@ async function callResearchAPI() {
 
     // Sign request with AWS Signature V4
     const signer = new SignatureV4({
-      credentials: defaultProvider(),
+      credentials: profile ? fromIni({ profile }) : defaultProvider(),
       region: 'us-east-1',
       service: 'execute-api',
       sha256: Hash.bind(null, 'sha256')
@@ -129,7 +156,8 @@ async function callResearchAPI() {
       console.error(`\n💡 Tip: Make sure the API is deployed to ${stage} stage`);
     } else if (error.name === 'CredentialsProviderError') {
       console.error('\n💡 Tip: Configure AWS credentials with:');
-      console.error('   aws configure --profile richcorabbithole');
+      console.error(`   aws configure --profile ${profile}`);
+      console.error('   or set AWS_PROFILE environment variable');
     }
     process.exit(1);
   }
