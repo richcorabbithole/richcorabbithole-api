@@ -140,10 +140,10 @@ Structure your research as markdown with:
 - An executive summary (2-3 sentences)
 - Key findings organized by theme
 - Important data points, statistics, or quotes
-- A list of recommended sources/references
+- A list of recommended sources/references with full URLs
 - Suggested angles for a blog post
 
-Be thorough but concise. Focus on accuracy and cite specific sources where possible.`,
+Be thorough but concise. Focus on accuracy and include URLs for all cited sources where possible. URLs may come from training data and should be verified by the reader.`,
       messages: [
         {
           role: "user",
