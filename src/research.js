@@ -10,7 +10,7 @@
  */
 
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
-const { DynamoDBDocumentClient, PutCommand } = require("@aws-sdk/lib-dynamodb");
+const { DynamoDBDocumentClient, PutCommand, UpdateCommand } = require("@aws-sdk/lib-dynamodb");
 const { SQSClient, SendMessageCommand } = require("@aws-sdk/client-sqs");
 const { randomUUID } = require("crypto");
 
@@ -21,13 +21,29 @@ const sqsClient = new SQSClient({});
 module.exports.handler = async (event) => {
   try {
     // Expects a topic key which contains a string
-    const body = JSON.parse(event.body || "{}");
-    const { topic } = body;
-
-    if (!topic) {
+    let body;
+    try {
+      body = JSON.parse(event.body || "{}");
+    } catch (parseErr) {
       return {
         statusCode: 400,
-        body: JSON.stringify({ error: "Missing required field: topic" })
+        body: JSON.stringify({ error: "Invalid JSON in request body" })
+      };
+    }
+
+    const { topic } = body;
+
+    if (!topic || typeof topic !== "string") {
+      return {
+        statusCode: 400,
+        body: JSON.stringify({ error: "Missing required field: topic (must be a string)" })
+      };
+    }
+
+    if (topic.length > 500) {
+      return {
+        statusCode: 400,
+        body: JSON.stringify({ error: "topic must be 500 characters or fewer" })
       };
     }
 
@@ -74,15 +90,18 @@ module.exports.handler = async (event) => {
       // Mark the orphaned DynamoDB record as failed so it doesn't appear permanently pending
       try {
         await docClient.send(
-          new PutCommand({
+          new UpdateCommand({
             TableName: process.env.TABLE_NAME,
-            Item: {
-              taskId,
-              status: "failed",
-              topic,
-              createdAt: now,
-              updatedAt: new Date().toISOString(),
-              error: errMsg
+            Key: { taskId },
+            UpdateExpression: "SET #status = :status, updatedAt = :now, #error = :error",
+            ExpressionAttributeNames: {
+              "#status": "status",
+              "#error": "error"
+            },
+            ExpressionAttributeValues: {
+              ":status": "failed",
+              ":now": new Date().toISOString(),
+              ":error": errMsg
             }
           })
         );

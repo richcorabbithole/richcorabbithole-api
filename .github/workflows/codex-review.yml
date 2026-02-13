@@ -76,7 +76,7 @@ jobs:
           1. **Bugs & Logic Errors** — Incorrect logic, unhandled promise rejections, missing error handling, broken Lambda responses.
           2. **Security** — Exposed secrets, overly permissive IAM roles, missing input validation, injection risks, insecure API Gateway config.
           3. **Performance** — Cold start impact, unnecessary SDK imports, missing connection reuse, Lambda timeout risks, inefficient DynamoDB queries.
-          4. **Infrastructure (serverless.yml)** — Misconfigured resources, missing DeletionPolicy, overly broad permissions, missing encryption, tag inconsistencies.
+          4. **Infrastructure (serverless.yml)** — Misconfigured resources, missing DeletionPolicy, overly broad permissions, missing encryption, tag inconsistencies. Make sure to check the full scope and not just the function scope.
           5. **AWS Best Practices** — Error handling patterns, idempotency, structured logging, environment variable usage, secrets management.
           6. **Code Quality** — Dead code, unclear naming, missing error handling, overly complex logic, missing tests.
 

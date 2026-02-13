@@ -32,7 +32,7 @@ async function getAnthropicApiKey() {
 
   const response = await secretsClient.send(
     new GetSecretValueCommand({
-      SecretId: "richcorabbithole/anthropic-api-key",
+      SecretId: process.env.SECRET_ID
     })
   );
 
@@ -46,7 +46,7 @@ async function updateTaskStatus(taskId, status, extraFields = {}) {
   const attributeNames = { "#status": "status" };
   const attributeValues = {
     ":status": status,
-    ":now": new Date().toISOString(),
+    ":now": new Date().toISOString()
   };
 
   for (const [key, value] of Object.entries(extraFields)) {
@@ -69,7 +69,11 @@ async function updateTaskStatus(taskId, status, extraFields = {}) {
 }
 
 module.exports.handler = async (event) => {
-  // Parse the SQS message
+  // Parse the SQS message — batchSize is 1 but guard defensively
+  if (!event.Records || event.Records.length === 0) {
+    console.error("No records in SQS event");
+    return;
+  }
 
   const record = event.Records[0];
   const { taskId, topic } = JSON.parse(record.body);
@@ -101,9 +105,9 @@ Be thorough but concise. Focus on accuracy and cite specific sources where possi
       messages: [
         {
           role: "user",
-          content: `Research the following topic thoroughly: ${topic}`,
-        },
-      ],
+          content: `Research the following topic thoroughly: ${topic}`
+        }
+      ]
     });
 
     const researchContent = message.content[0].text;
@@ -116,7 +120,7 @@ Be thorough but concise. Focus on accuracy and cite specific sources where possi
         Bucket: process.env.BUCKET_NAME,
         Key: s3Key,
         Body: researchContent,
-        ContentType: "text/markdown",
+        ContentType: "text/markdown"
       })
     );
 

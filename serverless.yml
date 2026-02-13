@@ -89,6 +89,7 @@ functions:
     environment:
       BUCKET_NAME: ${self:custom.bucketName}
       TABLE_NAME: ${self:custom.tableName}
+      SECRET_ID: richcorabbithole/anthropic-api-key
       STAGE: ${self:custom.stage}
     events:
       - sqs:
@@ -151,6 +152,7 @@ resources:
       Properties:
         QueueName: richcorabbithole-research-dlq-${self:custom.stage}
         MessageRetentionPeriod: 1209600
+        SqsManagedSseEnabled: true
         Tags:
           - Key: Project
             Value: richcorabbithole
@@ -166,6 +168,7 @@ resources:
         QueueName: richcorabbithole-research-queue-${self:custom.stage}
         VisibilityTimeout: 960
         MessageRetentionPeriod: 86400
+        SqsManagedSseEnabled: true
         RedrivePolicy:
           deadLetterTargetArn: !GetAtt ResearchDLQ.Arn
           maxReceiveCount: 2
