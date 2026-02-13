@@ -22,7 +22,7 @@ provider:
         - Effect: Allow
           Action:
             - secretsmanager:GetSecretValue
-          Resource: arn:aws:secretsmanager:us-east-1:444739497441:secret:richcorabbithole/*
+          Resource: arn:aws:secretsmanager:us-east-1:444739497441:secret:richcorabbithole/anthropic-api-key-*
         - Effect: Allow
           Action:
             - s3:GetObject
@@ -39,6 +39,10 @@ provider:
             - dynamodb:UpdateItem
             - dynamodb:Query
           Resource: arn:aws:dynamodb:us-east-1:444739497441:table/${self:custom.tableName}
+        - Effect: Allow
+          Action:
+            - sqs:SendMessage
+          Resource: !GetAtt ResearchQueue.Arn
   tags:
     Project: richcorabbithole
     Environment: ${self:provider.stage}
@@ -62,19 +66,35 @@ functions:
           path: /hello
           method: get
 
+  # Thin accept function: validates input, creates task record, queues work, returns immediately
   research:
     handler: src/research.handler
-    timeout: 29
-    memorySize: 1024
+    timeout: 10
+    memorySize: 256
     environment:
-      BUCKET_NAME: ${self:custom.bucketName}
       TABLE_NAME: ${self:custom.tableName}
+      RESEARCH_QUEUE_URL: !Ref ResearchQueue
       STAGE: ${self:custom.stage}
     events:
       - http:
           path: /research
           method: post
-          authorizer: aws_iam  # Requires AWS IAM credentials (most secure)
+          authorizer: aws_iam
+
+  # Worker function: triggered by SQS, does the actual Claude research (up to 15 min)
+  researchWorker:
+    handler: src/researchWorker.handler
+    timeout: 900
+    memorySize: 1024
+    environment:
+      BUCKET_NAME: ${self:custom.bucketName}
+      TABLE_NAME: ${self:custom.tableName}
+      SECRET_ID: richcorabbithole/anthropic-api-key
+      STAGE: ${self:custom.stage}
+    events:
+      - sqs:
+          arn: !GetAtt ResearchQueue.Arn
+          batchSize: 1
 
 resources:
   Resources:
@@ -125,6 +145,44 @@ resources:
         DomainName: ${self:custom.domainName}
         RestApiId: !Ref ApiGatewayRestApi
         Stage: ${self:custom.stage}
+
+    # Dead letter queue — receives messages that failed processing after maxReceiveCount attempts
+    ResearchDLQ:
+      Type: AWS::SQS::Queue
+      DeletionPolicy: Retain
+      UpdateReplacePolicy: Retain
+      Properties:
+        QueueName: richcorabbithole-research-dlq-${self:custom.stage}
+        MessageRetentionPeriod: 1209600
+        SqsManagedSseEnabled: true
+        Tags:
+          - Key: Project
+            Value: richcorabbithole
+          - Key: Environment
+            Value: ${self:custom.stage}
+          - Key: ManagedBy
+            Value: serverless
+
+    # Main research queue — the accept function sends messages here, the worker consumes them
+    ResearchQueue:
+      Type: AWS::SQS::Queue
+      DeletionPolicy: Retain
+      UpdateReplacePolicy: Retain
+      Properties:
+        QueueName: richcorabbithole-research-queue-${self:custom.stage}
+        VisibilityTimeout: 960
+        MessageRetentionPeriod: 86400
+        SqsManagedSseEnabled: true
+        RedrivePolicy:
+          deadLetterTargetArn: !GetAtt ResearchDLQ.Arn
+          maxReceiveCount: 2
+        Tags:
+          - Key: Project
+            Value: richcorabbithole
+          - Key: Environment
+            Value: ${self:custom.stage}
+          - Key: ManagedBy
+            Value: serverless
 
     TasksTable:
       Type: AWS::DynamoDB::Table
