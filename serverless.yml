@@ -22,7 +22,7 @@ provider:
         - Effect: Allow
           Action:
             - secretsmanager:GetSecretValue
-          Resource: arn:aws:secretsmanager:us-east-1:444739497441:secret:richcorabbithole/*
+          Resource: arn:aws:secretsmanager:us-east-1:444739497441:secret:richcorabbithole/anthropic-api-key-*
         - Effect: Allow
           Action:
             - s3:GetObject

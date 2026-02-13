@@ -77,7 +77,7 @@ module.exports.handler = async (event) => {
 
   const record = event.Records[0];
 
-  // Parse outside the main try so malformed messages don't retry pointlessly
+  // Parse outside the main try — structural failures are handled differently
   let taskId;
   let topic;
   try {
@@ -85,12 +85,25 @@ module.exports.handler = async (event) => {
     taskId = parsed.taskId;
     topic = parsed.topic;
   } catch (parseErr) {
-    console.error("Malformed SQS message body, skipping:", record.body);
-    return; // Don't throw — retrying won't fix bad JSON
+    // Bad JSON — throw so it retries then lands in DLQ for forensic investigation
+    console.error("Malformed SQS message body:", record.body);
+    throw new Error("Malformed SQS message body");
   }
 
-  if (!taskId || !topic) {
-    console.error("Missing taskId or topic in SQS message:", record.body);
+  if (!taskId) {
+    // No taskId means no DynamoDB record to update — send to DLQ for investigation
+    console.error("Missing taskId in SQS message:", record.body);
+    throw new Error("Missing taskId in SQS message");
+  }
+
+  if (!topic) {
+    // Has taskId but no topic — mark the existing DynamoDB record as failed, then delete message
+    console.error("Missing topic in SQS message:", record.body);
+    try {
+      await updateTaskStatus(taskId, "failed", { error: "Missing topic in SQS message" });
+    } catch (updateErr) {
+      console.error("Failed to mark task as failed:", updateErr);
+    }
     return;
   }
 
