@@ -6,10 +6,8 @@ describe("research accept handler", () => {
   let handler;
   let mockSend;
   let cleanup;
-  let callCount;
 
   beforeEach(() => {
-    callCount = 0;
     mockSend = mock.fn(async () => ({}));
     const setup = setupResearchMocks(mockSend);
     handler = setup.handler;
