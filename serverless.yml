@@ -149,6 +149,8 @@ resources:
     # Dead letter queue — receives messages that failed processing after maxReceiveCount attempts
     ResearchDLQ:
       Type: AWS::SQS::Queue
+      DeletionPolicy: Retain
+      UpdateReplacePolicy: Retain
       Properties:
         QueueName: richcorabbithole-research-dlq-${self:custom.stage}
         MessageRetentionPeriod: 1209600
@@ -164,6 +166,8 @@ resources:
     # Main research queue — the accept function sends messages here, the worker consumes them
     ResearchQueue:
       Type: AWS::SQS::Queue
+      DeletionPolicy: Retain
+      UpdateReplacePolicy: Retain
       Properties:
         QueueName: richcorabbithole-research-queue-${self:custom.stage}
         VisibilityTimeout: 960

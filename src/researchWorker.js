@@ -16,7 +16,7 @@
  */
 
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
-const { DynamoDBDocumentClient, UpdateCommand } = require("@aws-sdk/lib-dynamodb");
+const { DynamoDBDocumentClient, UpdateCommand, GetCommand } = require("@aws-sdk/lib-dynamodb");
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 const { SecretsManagerClient, GetSecretValueCommand } = require("@aws-sdk/client-secrets-manager");
 
@@ -69,17 +69,46 @@ async function updateTaskStatus(taskId, status, extraFields = {}) {
 }
 
 module.exports.handler = async (event) => {
-  // Parse the SQS message — batchSize is 1 but guard defensively
+  // batchSize is 1 but guard defensively
   if (!event.Records || event.Records.length === 0) {
     console.error("No records in SQS event");
     return;
   }
 
   const record = event.Records[0];
-  const { taskId, topic } = JSON.parse(record.body);
+
+  // Parse outside the main try so malformed messages don't retry pointlessly
+  let taskId;
+  let topic;
+  try {
+    const parsed = JSON.parse(record.body);
+    taskId = parsed.taskId;
+    topic = parsed.topic;
+  } catch (parseErr) {
+    console.error("Malformed SQS message body, skipping:", record.body);
+    return; // Don't throw — retrying won't fix bad JSON
+  }
+
+  if (!taskId || !topic) {
+    console.error("Missing taskId or topic in SQS message:", record.body);
+    return;
+  }
 
   try {
-    // Update the task record to reserarching
+    // Check if already processed (idempotency guard for at-least-once delivery)
+    const existing = await docClient.send(
+      new GetCommand({
+        TableName: process.env.TABLE_NAME,
+        Key: { taskId }
+      })
+    );
+
+    if (existing.Item && existing.Item.status === "researched") {
+      console.log(`Task ${taskId} already researched, skipping`);
+      return { taskId, status: "already_researched" };
+    }
+
+    // Update the task record to researching
     await updateTaskStatus(taskId, "researching");
 
     const apiKey = await getAnthropicApiKey();
@@ -110,7 +139,11 @@ Be thorough but concise. Focus on accuracy and cite specific sources where possi
       ]
     });
 
-    const researchContent = message.content[0].text;
+    const textBlock = message.content.find(block => block.type === "text");
+    if (!textBlock) {
+      throw new Error("Claude returned no text content");
+    }
+    const researchContent = textBlock.text;
 
     // Store the research
     const s3Key = `research/${taskId}.md`;
