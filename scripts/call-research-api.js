@@ -99,7 +99,7 @@ async function callResearchAPI() {
       path: '/research',
       headers: {
         'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(body),
+        'Content-Length': String(Buffer.byteLength(body)),
         'Host': hostname
       },
       body: body
