@@ -69,21 +69,36 @@ jobs:
             --skip-git-repo-check \
             -o /tmp/review-output.md \
             "You are reviewing a pull request for a serverless agent pipeline API.
-          The tech stack is: Serverless Framework 4, AWS Lambda (Node.js 20), DynamoDB, S3, API Gateway, AWS SDK v3.
+          The tech stack is: Serverless Framework 4, AWS Lambda (Node.js 24), DynamoDB, S3, SQS, API Gateway, AWS SDK v3.
 
-          The PR diff is in /tmp/pr-diff.txt. Read that file and review the changes for:
+          The PR diff is in /tmp/pr-diff.txt. The full repo is checked out in the working directory.
+          Start by reading the diff. When the diff alone is insufficient to verify an issue (e.g. checking
+          IAM permissions, environment variables, or existing implementations), read the relevant source files
+          directly before flagging. Do NOT report issues you cannot confirm after checking the source.
+
+          Key architectural context for this repo:
+          - serverless.yml uses a SHARED provider-level IAM role (provider.iam.role.statements) that applies
+            to ALL Lambda functions. Individual functions do NOT have per-function IAM roles. Before flagging
+            a missing permission, read serverless.yml and check the provider.iam block.
+          - SQS-triggered workers use shared-utils.js (src/lib/shared-utils.js) for AWS client singletons.
+            Check what that module exports before flagging missing client setup.
+          - SQS error contract: throw = retry/DLQ, return = message deleted. Workers that intentionally
+            catch errors and return are doing so by design (non-fatal error paths).
+
+          Review the changes for:
 
           1. **Bugs & Logic Errors** — Incorrect logic, unhandled promise rejections, missing error handling, broken Lambda responses.
           2. **Security** — Exposed secrets, overly permissive IAM roles, missing input validation, injection risks, insecure API Gateway config.
           3. **Performance** — Cold start impact, unnecessary SDK imports, missing connection reuse, Lambda timeout risks, inefficient DynamoDB queries.
-          4. **Infrastructure (serverless.yml)** — Misconfigured resources, missing DeletionPolicy, overly broad permissions, missing encryption, tag inconsistencies. Make sure to check the full scope and not just the function scope.
+          4. **Infrastructure (serverless.yml)** — Misconfigured resources, missing DeletionPolicy, overly broad permissions, missing encryption, tag inconsistencies. Always read the full serverless.yml before flagging IAM or environment variable issues — the provider block defines shared config inherited by all functions.
           5. **AWS Best Practices** — Error handling patterns, idempotency, structured logging, environment variable usage, secrets management.
           6. **Code Quality** — Dead code, unclear naming, missing error handling, overly complex logic, missing tests.
 
           Format your review as a structured markdown report with sections for each category.
           Only include sections where you found issues. If everything looks good in a category, omit it.
           Start with a brief summary of the PR changes and an overall assessment.
-          Be constructive and specific — reference file names and line numbers where possible."
+          Be constructive and specific — reference file names and line numbers where possible.
+          Mark any finding where you could not verify against the full source as (unverified)."
 
       - name: Post review comment on PR
         if: steps.check_secret.outputs.secret_available == 'true'

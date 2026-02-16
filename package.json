@@ -8,7 +8,9 @@
     "deploy:prod": "serverless deploy --stage prod --aws-profile richcorabbithole",
     "remove:dev": "serverless remove --stage dev --aws-profile richcorabbithole",
     "invoke:hello": "serverless invoke -f hello --stage dev --aws-profile richcorabbithole",
-    "research": "node scripts/call-research-api.js",
+    "research": "node scripts/cli.js research",
+    "draft": "node scripts/cli.js draft",
+    "read-draft": "node scripts/cli.js read-draft",
     "lint": "eslint src/",
     "test": "node --test --test-concurrency=1 tests/**/*.test.js"
   },

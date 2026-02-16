@@ -17,13 +17,7 @@
 
 const { GetCommand } = require("@aws-sdk/lib-dynamodb");
 const { PutObjectCommand } = require("@aws-sdk/client-s3");
-const {
-  getDocClient,
-  getS3Client,
-  getAnthropicApiKey,
-  updateTaskStatus,
-  parseSqsMessage
-} = require("./lib/worker-utils");
+const { getDocClient, getS3Client, getAnthropicApiKey, updateTaskStatus, parseSqsMessage, sendSqsMessage } = require("./lib/shared-utils");
 
 module.exports.handler = async (event) => {
   const msg = parseSqsMessage(event);
@@ -111,8 +105,19 @@ Be thorough but concise. Focus on accuracy and include URLs for all cited source
     // Update task record to researched
     await updateTaskStatus(taskId, "researched", { s3Key });
 
-    // TODO: Assemble the rest of the agent pipeline, this return is a placeholder
-    console.log(`Research complete for task ${taskId}: ${s3Key}`);
+    // Enqueue write job — non-fatal since research is already persisted.
+    // If this fails, the task stays "researched" and can be re-triggered via cli.js draft.
+    try {
+      if (!process.env.WRITE_QUEUE_URL) {
+        console.error(`WRITE_QUEUE_URL not set — skipping write enqueue for task ${taskId}`);
+      } else {
+        await sendSqsMessage(process.env.WRITE_QUEUE_URL, { taskId });
+        console.log(`Research complete for task ${taskId}: ${s3Key} — write job enqueued`);
+      }
+    } catch (enqueueErr) {
+      console.error(`Research saved but failed to enqueue write job for ${taskId}:`, enqueueErr);
+    }
+
     return { taskId, s3Key, status: "researched" };
   } catch (error) {
     console.error(`Research failed for task ${taskId}:`, error);
