@@ -94,6 +94,7 @@ functions:
       TABLE_NAME: ${self:custom.tableName}
       SECRET_ID: richcorabbithole/anthropic-api-key
       STAGE: ${self:custom.stage}
+      WRITE_QUEUE_URL: !Ref WriteQueue
     events:
       - sqs:
           arn: !GetAtt ResearchQueue.Arn

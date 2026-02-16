@@ -100,12 +100,14 @@ describe("researchWorker handler", () => {
       const callNames = mockSend.mock.calls.map(c => c.arguments[0].name);
 
       // Expected order: GetCommand (idempotency), UpdateCommand (researching),
-      // GetSecretValueCommand, PutObjectCommand (S3), UpdateCommand (researched)
+      // GetSecretValueCommand, PutObjectCommand (S3), UpdateCommand (researched),
+      // SendMessageCommand (enqueue write job)
       assert.strictEqual(callNames[0], "GetCommand");
       assert.strictEqual(callNames[1], "UpdateCommand");
       assert.strictEqual(callNames[2], "GetSecretValueCommand");
       assert.strictEqual(callNames[3], "PutObjectCommand");
       assert.strictEqual(callNames[4], "UpdateCommand");
+      assert.strictEqual(callNames[5], "SendMessageCommand");
     });
 
     it("writes S3 object with correct key pattern", async () => {
@@ -117,6 +119,39 @@ describe("researchWorker handler", () => {
       assert.strictEqual(s3Call.arguments[0].params.Key, "research/t1.md");
       assert.strictEqual(s3Call.arguments[0].params.Bucket, "test-research-bucket");
       assert.strictEqual(s3Call.arguments[0].params.ContentType, "text/markdown");
+    });
+
+    it("enqueues write job to WriteQueue after research", async () => {
+      await handler(sqsEvent({ taskId: "t1", topic: "test topic" }));
+
+      const sqsCall = mockSend.mock.calls.find(
+        c => c.arguments[0].name === "SendMessageCommand"
+      );
+      assert.ok(sqsCall, "Expected a SendMessageCommand call");
+      assert.strictEqual(sqsCall.arguments[0].params.QueueUrl, process.env.WRITE_QUEUE_URL);
+      const messageBody = JSON.parse(sqsCall.arguments[0].params.MessageBody);
+      assert.strictEqual(messageBody.taskId, "t1");
+    });
+
+    it("returns successfully when write queue enqueue fails", async () => {
+      mockSend.mock.mockImplementation(async (cmd) => {
+        if (cmd.name === "GetCommand") {
+          return { Item: { taskId: "t1", status: "pending" } };
+        }
+        if (cmd.name === "GetSecretValueCommand") {
+          return { SecretString: "sk-ant-test-key" };
+        }
+        if (cmd.name === "SendMessageCommand") {
+          throw new Error("SQS write queue unavailable");
+        }
+        return {};
+      });
+
+      const result = await handler(sqsEvent({ taskId: "t1", topic: "test" }));
+
+      // Should still return researched — enqueue failure is non-fatal
+      assert.strictEqual(result.status, "researched");
+      assert.strictEqual(result.taskId, "t1");
     });
 
     it("returns taskId, s3Key, and researched status", async () => {

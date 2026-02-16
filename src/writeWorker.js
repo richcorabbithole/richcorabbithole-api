@@ -19,14 +19,7 @@
 
 const { GetCommand } = require("@aws-sdk/lib-dynamodb");
 const { PutObjectCommand, CopyObjectCommand } = require("@aws-sdk/client-s3");
-const {
-  getDocClient,
-  getS3Client,
-  getAnthropicApiKey,
-  updateTaskStatus,
-  getS3Object,
-  parseSqsMessage
-} = require("./lib/worker-utils");
+const { getDocClient, getS3Client, getS3Object, getAnthropicApiKey, updateTaskStatus, parseSqsMessage } = require("./lib/shared-utils");
 
 const FIRST_DRAFT_SYSTEM_PROMPT = `You are a blog writer for richcorabbithole — a blog about going deep on random topics (hyperfixations).
 

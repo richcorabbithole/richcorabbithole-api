@@ -1,22 +1,24 @@
 /**
- * Shared utilities for SQS-triggered Lambda workers.
+ * Shared AWS utilities for Lambda handlers and workers.
  *
  * Provides AWS client singletons, common helpers (API key retrieval,
- * task status updates, S3 reads), and SQS message parsing.
+ * task status updates, S3 reads, SQS sends), and SQS message parsing.
  *
- * Each worker imports what it needs; module-scoped clients are created
- * once per Lambda cold start and reused across invocations.
+ * Each handler/worker imports what it needs; module-scoped clients are
+ * created once per Lambda cold start and reused across invocations.
  */
 
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
 const { DynamoDBDocumentClient, UpdateCommand } = require("@aws-sdk/lib-dynamodb");
 const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
+const { SQSClient, SendMessageCommand } = require("@aws-sdk/client-sqs");
 const { SecretsManagerClient, GetSecretValueCommand } = require("@aws-sdk/client-secrets-manager");
 
 // Module-scoped singletons (one per Lambda container)
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
 const s3Client = new S3Client({});
+const sqsClient = new SQSClient({});
 const secretsClient = new SecretsManagerClient({});
 
 let cachedApiKey = null;
@@ -102,11 +104,22 @@ function parseSqsMessage(event) {
   return { taskId: parsed.taskId, body: parsed };
 }
 
+async function sendSqsMessage(queueUrl, body) {
+  await sqsClient.send(
+    new SendMessageCommand({
+      QueueUrl: queueUrl,
+      MessageBody: JSON.stringify(body)
+    })
+  );
+}
+
 module.exports = {
   getDocClient: () => docClient,
   getS3Client: () => s3Client,
+  getSqsClient: () => sqsClient,
   getAnthropicApiKey,
   updateTaskStatus,
   getS3Object,
-  parseSqsMessage
+  parseSqsMessage,
+  sendSqsMessage
 };
