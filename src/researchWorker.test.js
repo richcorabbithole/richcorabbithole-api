@@ -1,15 +1,12 @@
 const { describe, it, mock, beforeEach, afterEach } = require("node:test");
 const assert = require("node:assert");
 const { setupWorkerMocks } = require("./test-helpers/mock-aws.js");
-
-// Helper to build an SQS event with the given body
-function sqsEvent(body) {
-  return {
-    Records: [{
-      body: typeof body === "string" ? body : JSON.stringify(body)
-    }]
-  };
-}
+const {
+  sqsEvent,
+  runSqsValidationTests,
+  runClaudeResponseTests,
+  runErrorHandlingTests
+} = require("./test-helpers/worker-test-utils.js");
 
 describe("researchWorker handler", () => {
   let handler;
@@ -43,33 +40,13 @@ describe("researchWorker handler", () => {
     mock.restoreAll();
   });
 
-  // --- SQS event validation ---
+  // --- Shared SQS validation tests ---
 
-  describe("SQS event validation", () => {
-    it("returns undefined on empty Records array", async () => {
-      const result = await handler({ Records: [] });
-      assert.strictEqual(result, undefined);
-    });
+  runSqsValidationTests(() => handler);
 
-    it("returns undefined on missing Records", async () => {
-      const result = await handler({});
-      assert.strictEqual(result, undefined);
-    });
+  // --- Domain-specific: topic validation ---
 
-    it("throws on malformed JSON body for DLQ", async () => {
-      await assert.rejects(
-        () => handler({ Records: [{ body: "not json" }] }),
-        { message: "Malformed SQS message body" }
-      );
-    });
-
-    it("throws on missing taskId for DLQ", async () => {
-      await assert.rejects(
-        () => handler(sqsEvent({ topic: "test" })),
-        { message: "Missing taskId in SQS message" }
-      );
-    });
-
+  describe("topic validation", () => {
     it("marks task failed and returns when topic is missing", async () => {
       const result = await handler(sqsEvent({ taskId: "t1" }));
 
@@ -151,62 +128,36 @@ describe("researchWorker handler", () => {
     });
   });
 
-  // --- Claude response handling ---
+  // --- Shared Claude response handling ---
 
-  describe("Claude response handling", () => {
-    it("throws when Claude returns empty content array", async () => {
-      mockCreate.mock.mockImplementation(async () => ({
-        content: []
-      }));
+  runClaudeResponseTests(
+    () => handler,
+    () => sqsEvent({ taskId: "t1", topic: "test" }),
+    "researched",
+    () => mockCreate,
+    () => mockSend,
+    "The actual research"
+  );
 
-      await assert.rejects(
-        () => handler(sqsEvent({ taskId: "t1", topic: "test" })),
-        { message: "Claude returned no text content" }
-      );
-    });
+  // --- Shared + domain-specific error handling ---
 
-    it("finds text block among mixed content types", async () => {
-      mockCreate.mock.mockImplementation(async () => ({
-        content: [
-          { type: "tool_use", id: "123", name: "test" },
-          { type: "text", text: "The actual research" }
-        ]
-      }));
+  runErrorHandlingTests(
+    () => handler,
+    () => sqsEvent({ taskId: "t1", topic: "test" }),
+    () => mockCreate,
+    () => mockSend,
+    (cmd) => {
+      if (cmd.name === "GetCommand") {
+        return { Item: { taskId: "t1", status: "pending" } };
+      }
+      if (cmd.name === "GetSecretValueCommand") {
+        return { SecretString: "sk-ant-test-key" };
+      }
+      return {};
+    }
+  );
 
-      const result = await handler(sqsEvent({ taskId: "t1", topic: "test" }));
-
-      assert.strictEqual(result.status, "researched");
-      // Verify S3 received the text content
-      const s3Call = mockSend.mock.calls.find(
-        c => c.arguments[0].name === "PutObjectCommand"
-      );
-      assert.strictEqual(s3Call.arguments[0].params.Body, "The actual research");
-    });
-  });
-
-  // --- Error handling ---
-
-  describe("error handling", () => {
-    it("marks task failed and re-throws on Claude API failure", async () => {
-      mockCreate.mock.mockImplementation(async () => {
-        throw new Error("API rate limited");
-      });
-
-      await assert.rejects(
-        () => handler(sqsEvent({ taskId: "t1", topic: "test" })),
-        { message: "API rate limited" }
-      );
-
-      // Check that task was marked as failed
-      const updateCalls = mockSend.mock.calls.filter(
-        c => c.arguments[0].name === "UpdateCommand"
-      );
-      const failedUpdate = updateCalls.find(
-        c => c.arguments[0].params.ExpressionAttributeValues[":status"] === "failed"
-      );
-      assert.ok(failedUpdate, "Expected task to be marked as failed");
-    });
-
+  describe("domain-specific errors", () => {
     it("marks task failed and re-throws on S3 failure", async () => {
       mockSend.mock.mockImplementation(async (cmd) => {
         if (cmd.name === "GetCommand") {
@@ -224,38 +175,6 @@ describe("researchWorker handler", () => {
       await assert.rejects(
         () => handler(sqsEvent({ taskId: "t1", topic: "test" })),
         { message: "S3 bucket not found" }
-      );
-    });
-
-    it("re-throws original error even when status update fails", async () => {
-      let updateCallCount = 0;
-      mockSend.mock.mockImplementation(async (cmd) => {
-        if (cmd.name === "GetCommand") {
-          return { Item: { taskId: "t1", status: "pending" } };
-        }
-        if (cmd.name === "GetSecretValueCommand") {
-          return { SecretString: "sk-ant-test-key" };
-        }
-        if (cmd.name === "UpdateCommand") {
-          updateCallCount++;
-          // Let the first UpdateCommand (researching) succeed
-          // but fail on the second (failed status update in catch block)
-          if (updateCallCount >= 2) {
-            throw new Error("DynamoDB down too");
-          }
-          return {};
-        }
-        return {};
-      });
-
-      mockCreate.mock.mockImplementation(async () => {
-        throw new Error("Original Claude error");
-      });
-
-      // The original error should be re-thrown, not the DynamoDB error
-      await assert.rejects(
-        () => handler(sqsEvent({ taskId: "t1", topic: "test" })),
-        { message: "Original Claude error" }
       );
     });
   });
