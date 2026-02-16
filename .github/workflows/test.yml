@@ -1,0 +1,59 @@
+name: Test
+
+on:
+  pull_request:
+    branches:
+      - development
+
+jobs:
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm test
+
+  eol-check:
+    name: AWS runtime EoL check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Lambda runtime EoL
+        run: |
+          RUNTIME=$(grep -oP 'runtime:\s*\Knodejs\d+\.x' serverless.yml)
+          echo "Lambda runtime: $RUNTIME"
+
+          EOL_DATA=$(curl -sf "https://endoflife.date/api/aws-lambda.json")
+          EOL_DATE=$(echo "$EOL_DATA" | jq -r --arg rt "$RUNTIME" '.[] | select(.cycle == $rt) | .eol')
+
+          if [ -z "$EOL_DATE" ] || [ "$EOL_DATE" = "null" ]; then
+            echo "::warning::Runtime $RUNTIME not found in EoL database — verify manually"
+            exit 0
+          fi
+
+          if [ "$EOL_DATE" = "false" ]; then
+            echo "Runtime $RUNTIME has no scheduled EoL date"
+            exit 0
+          fi
+
+          echo "EoL date for $RUNTIME: $EOL_DATE"
+          TODAY=$(date -u +%Y-%m-%d)
+          DAYS_LEFT=$(( ($(date -d "$EOL_DATE" +%s) - $(date -d "$TODAY" +%s)) / 86400 ))
+
+          if [ "$DAYS_LEFT" -lt 0 ]; then
+            echo "::error::Runtime $RUNTIME reached EoL on $EOL_DATE ($((DAYS_LEFT * -1)) days ago). Upgrade immediately."
+            exit 1
+          elif [ "$DAYS_LEFT" -lt 90 ]; then
+            echo "::warning::Runtime $RUNTIME reaches EoL on $EOL_DATE ($DAYS_LEFT days remaining). Plan an upgrade."
+          else
+            echo "Runtime $RUNTIME is supported until $EOL_DATE ($DAYS_LEFT days remaining)"
+          fi
