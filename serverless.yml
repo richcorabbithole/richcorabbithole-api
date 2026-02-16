@@ -6,6 +6,7 @@ package:
   patterns:
     - '!scripts/**'
     - '!docs/**'
+    - '!tests/**'
     - '!.gitignore'
     - '!README.md'
 
