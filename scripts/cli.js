@@ -64,6 +64,14 @@ if (!profile && process.env.AWS_PROFILE) {
   profile = process.env.AWS_PROFILE;
 }
 
+// --- Validate stage ---
+
+const VALID_STAGES = ["dev", "prod"];
+if (!VALID_STAGES.includes(stage)) {
+  console.error(`Unknown stage: ${stage}. Use 'dev' or 'prod'`);
+  process.exit(1);
+}
+
 // --- Resource naming patterns (from serverless.yml custom section) ---
 
 const TABLE_NAME = `richcorabbithole-tasks-${stage}`;
@@ -111,10 +119,6 @@ async function researchCommand() {
   }
 
   const hostname = ENDPOINTS[stage];
-  if (!hostname) {
-    console.error(`Unknown stage: ${stage}. Use 'dev' or 'prod'`);
-    process.exit(1);
-  }
 
   // Lazy-load SigV4 dependencies (only needed for this subcommand)
   const { SignatureV4 } = require("@smithy/signature-v4");
