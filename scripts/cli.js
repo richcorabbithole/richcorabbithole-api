@@ -76,6 +76,13 @@ const ENDPOINTS = {
   prod: "api.richcorabbithole.com"
 };
 
+// --- Helpers ---
+
+function countWords(text) {
+  const trimmed = text.trim();
+  return trimmed ? trimmed.split(/\s+/).length : 0;
+}
+
 // --- AWS client factory ---
 
 function makeClientConfig() {
@@ -307,7 +314,7 @@ async function readDraftCommand(taskId) {
     }
 
     // Word count
-    const wordCount = body.trim().split(/\s+/).length;
+    const wordCount = countWords(body);
     console.log(`📊 Word count: ${wordCount}`);
 
     console.log(`\n--- Frontmatter ---\n${frontmatter}\n---`);
@@ -325,7 +332,7 @@ async function readDraftCommand(taskId) {
     // No frontmatter detected — just print the raw content
     console.log(`\n--- Draft content ---\n`);
     const lines = draftContent.trim().split("\n");
-    const wordCount = draftContent.trim().split(/\s+/).length;
+    const wordCount = countWords(draftContent);
     console.log(`📊 Word count: ${wordCount}`);
     console.log(lines.slice(0, 30).join("\n"));
     if (lines.length > 30) {

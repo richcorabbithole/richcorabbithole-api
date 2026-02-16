@@ -108,8 +108,12 @@ Be thorough but concise. Focus on accuracy and include URLs for all cited source
     // Enqueue write job — non-fatal since research is already persisted.
     // If this fails, the task stays "researched" and can be re-triggered via cli.js draft.
     try {
-      await sendSqsMessage(process.env.WRITE_QUEUE_URL, { taskId });
-      console.log(`Research complete for task ${taskId}: ${s3Key} — write job enqueued`);
+      if (!process.env.WRITE_QUEUE_URL) {
+        console.error(`WRITE_QUEUE_URL not set — skipping write enqueue for task ${taskId}`);
+      } else {
+        await sendSqsMessage(process.env.WRITE_QUEUE_URL, { taskId });
+        console.log(`Research complete for task ${taskId}: ${s3Key} — write job enqueued`);
+      }
     } catch (enqueueErr) {
       console.error(`Research saved but failed to enqueue write job for ${taskId}:`, enqueueErr);
     }
