@@ -17,7 +17,7 @@ Client (CLI) ─── POST /research ───> API Gateway (IAM auth)
                                     │ Return 202 + taskId  │
                                     └────────┬───────────┘
                                              │
-                                        SQS Queue
+                                      ResearchQueue (SQS)
                                     (VisibilityTimeout: 960s)
                                              │
                                     researchWorker.js
@@ -25,7 +25,18 @@ Client (CLI) ─── POST /research ───> API Gateway (IAM auth)
                                     │ Idempotency check   │
                                     │ Fetch API key       │
                                     │ Call Claude API      │
-                                    │ Save to S3           │
+                                    │ Save research to S3  │
+                                    │ Update DynamoDB      │
+                                    └────────┬───────────┘
+                                             │
+                                       WriteQueue (SQS)
+                                    (VisibilityTimeout: 960s)
+                                             │
+                                    writeWorker.js
+                                    ┌────────────────────┐
+                                    │ Read research from S3│
+                                    │ Call Claude API      │
+                                    │ Save draft to S3     │
                                     │ Update DynamoDB      │
                                     └────────┬───────────┘
                                              │
@@ -34,7 +45,7 @@ Client (CLI) ─── POST /research ───> API Gateway (IAM auth)
 
 ### Services
 
-- **Lambda** (Node.js 22) - Serverless functions
+- **Lambda** (Node.js 24) - Serverless functions
 - **API Gateway** - REST endpoint with IAM authorization
 - **SQS** - Async job queue with dead letter queue
 - **S3** - Research content storage (`richcorabbithole-research-{stage}`)
@@ -47,10 +58,22 @@ Client (CLI) ─── POST /research ───> API Gateway (IAM auth)
 src/
   hello.js              # Health check endpoint
   research.js           # Thin accept handler (validate, queue, 202)
-  researchWorker.js     # SQS worker (Claude API, S3, DynamoDB)
+  researchWorker.js     # SQS research worker (Claude API, S3, DynamoDB)
+  writeWorker.js        # SQS writing worker (drafts & revisions)
+  lib/
+    worker-utils.js     # Shared worker utilities (AWS clients, helpers)
+tests/
+  hello.test.js         # Tests for health check
+  research.test.js      # Tests for accept handler
+  researchWorker.test.js # Tests for research worker
+  writeWorker.test.js   # Tests for write worker
+  test-helpers/
+    mock-aws.js         # AWS SDK mock infrastructure
+    worker-test-utils.js # Shared worker test behaviors
 scripts/
   call-research-api.js  # CLI tool with SigV4 signing
 .github/workflows/
+  test.yml              # Run tests on PRs + EoL check
   deploy-dev.yml        # Deploy on merge to development
   deploy-prod.yml       # Deploy on release from main
   codex-review.yml      # Automated code review on PRs
@@ -58,7 +81,7 @@ scripts/
 
 ## Prerequisites
 
-- Node.js 22+
+- Node.js 24+
 - AWS CLI configured with a `richcorabbithole` profile
 - Serverless Framework v4 (`npm install -g serverless`)
 
@@ -128,7 +151,7 @@ node scripts/call-research-api.js --topic "your topic" --profile richcorabbithol
 💡 Track your task: GET /research/a1b2c3d4-...
 ```
 
-The worker picks up the task from SQS, calls the Claude API, and saves the research markdown to S3. Task status progresses: `pending` -> `researching` -> `researched` (or `failed`).
+The pipeline picks up the task from SQS and progresses it through stages. Task status progresses: `pending` → `researching` → `researched` → `writing` → `drafted` (or `failed` at any step).
 
 ## Stages
 

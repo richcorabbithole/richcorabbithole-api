@@ -14,10 +14,10 @@
 const path = require("path");
 
 // Paths to handler modules (used for cache invalidation)
-const RESEARCH_PATH = path.resolve(__dirname, "../research.js");
-const WORKER_PATH = path.resolve(__dirname, "../researchWorker.js");
-const WRITE_WORKER_PATH = path.resolve(__dirname, "../writeWorker.js");
-const WORKER_UTILS_PATH = path.resolve(__dirname, "../lib/worker-utils.js");
+const RESEARCH_PATH = path.resolve(__dirname, "../../src/research.js");
+const WORKER_PATH = path.resolve(__dirname, "../../src/researchWorker.js");
+const WRITE_WORKER_PATH = path.resolve(__dirname, "../../src/writeWorker.js");
+const WORKER_UTILS_PATH = path.resolve(__dirname, "../../src/lib/worker-utils.js");
 
 /**
  * Build a fake module cache entry.

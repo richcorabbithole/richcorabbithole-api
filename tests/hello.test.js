@@ -1,6 +1,6 @@
 const { describe, it } = require("node:test");
 const assert = require("node:assert");
-const { handler } = require("./hello.js");
+const { handler } = require("../src/hello.js");
 
 describe("hello handler", () => {
   it("returns 200 with greeting message", async () => {
