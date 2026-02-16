@@ -17,7 +17,7 @@ const path = require("path");
 const RESEARCH_PATH = path.resolve(__dirname, "../../src/research.js");
 const WORKER_PATH = path.resolve(__dirname, "../../src/researchWorker.js");
 const WRITE_WORKER_PATH = path.resolve(__dirname, "../../src/writeWorker.js");
-const WORKER_UTILS_PATH = path.resolve(__dirname, "../../src/lib/worker-utils.js");
+const SHARED_UTILS_PATH = path.resolve(__dirname, "../../src/lib/shared-utils.js");
 
 /**
  * Build a fake module cache entry.
@@ -39,8 +39,9 @@ function fakeCacheEntry(modulePath, exports) {
  * @returns {{ handler: Function, cleanup: Function }}
  */
 function setupResearchMocks(mockSend) {
-  // Clear handler from cache so it re-evaluates with our fakes
+  // Clear handler and shared lib from cache so they re-evaluate with our fakes
   delete require.cache[RESEARCH_PATH];
+  delete require.cache[SHARED_UTILS_PATH];
 
   // Fake DynamoDB client
   const dynamoPath = require.resolve("@aws-sdk/client-dynamodb");
@@ -78,6 +79,23 @@ function setupResearchMocks(mockSend) {
     }
   });
 
+  // Fake S3 + Secrets Manager (shared-utils creates these singletons at module scope)
+  const s3Path = require.resolve("@aws-sdk/client-s3");
+  require.cache[s3Path] = fakeCacheEntry(s3Path, {
+    S3Client: class { send(cmd) { return mockSend(cmd); } },
+    GetObjectCommand: class GetObjectCommand {
+      constructor(params) { this.params = params; this.name = "GetObjectCommand"; }
+    }
+  });
+
+  const secretsPath = require.resolve("@aws-sdk/client-secrets-manager");
+  require.cache[secretsPath] = fakeCacheEntry(secretsPath, {
+    SecretsManagerClient: class { send(cmd) { return mockSend(cmd); } },
+    GetSecretValueCommand: class GetSecretValueCommand {
+      constructor(params) { this.params = params; this.name = "GetSecretValueCommand"; }
+    }
+  });
+
   // Fake crypto.randomUUID for deterministic taskIds
   const cryptoPath = require.resolve("crypto");
   const realCrypto = require("crypto");
@@ -96,9 +114,12 @@ function setupResearchMocks(mockSend) {
 
   const cleanup = () => {
     delete require.cache[RESEARCH_PATH];
+    delete require.cache[SHARED_UTILS_PATH];
     delete require.cache[dynamoPath];
     delete require.cache[libDynamoPath];
     delete require.cache[sqsPath];
+    delete require.cache[s3Path];
+    delete require.cache[secretsPath];
     delete require.cache[cryptoPath];
     delete process.env.TABLE_NAME;
     delete process.env.RESEARCH_QUEUE_URL;
@@ -126,7 +147,7 @@ function setupWorkerMocks(mockSend, mockCreate, options = {}) {
 
   // Clear handler and shared lib from cache
   delete require.cache[handlerPath];
-  delete require.cache[WORKER_UTILS_PATH];
+  delete require.cache[SHARED_UTILS_PATH];
 
   // Fake DynamoDB client
   const dynamoPath = require.resolve("@aws-sdk/client-dynamodb");
@@ -166,6 +187,17 @@ function setupWorkerMocks(mockSend, mockCreate, options = {}) {
   };
   require.cache[s3Path] = fakeCacheEntry(s3Path, s3Exports);
 
+  // Fake SQS client + command (shared-utils initialises an SQS singleton)
+  const sqsPath = require.resolve("@aws-sdk/client-sqs");
+  require.cache[sqsPath] = fakeCacheEntry(sqsPath, {
+    SQSClient: class {
+      send(cmd) { return mockSend(cmd); }
+    },
+    SendMessageCommand: class SendMessageCommand {
+      constructor(params) { this.params = params; this.name = "SendMessageCommand"; }
+    }
+  });
+
   // Fake Secrets Manager client + command
   const secretsPath = require.resolve("@aws-sdk/client-secrets-manager");
   require.cache[secretsPath] = fakeCacheEntry(secretsPath, {
@@ -191,22 +223,25 @@ function setupWorkerMocks(mockSend, mockCreate, options = {}) {
   process.env.BUCKET_NAME = "test-research-bucket";
   process.env.SECRET_ID = "test/anthropic-api-key";
   process.env.STAGE = "test";
+  process.env.WRITE_QUEUE_URL = "https://sqs.us-east-1.amazonaws.com/123456789/test-write-queue";
 
   // Load handler with faked dependencies
   const handler = require(handlerPath).handler;
 
   const cleanup = () => {
     delete require.cache[handlerPath];
-    delete require.cache[WORKER_UTILS_PATH];
+    delete require.cache[SHARED_UTILS_PATH];
     delete require.cache[dynamoPath];
     delete require.cache[libDynamoPath];
     delete require.cache[s3Path];
+    delete require.cache[sqsPath];
     delete require.cache[secretsPath];
     delete require.cache[anthropicPath];
     delete process.env.TABLE_NAME;
     delete process.env.BUCKET_NAME;
     delete process.env.SECRET_ID;
     delete process.env.STAGE;
+    delete process.env.WRITE_QUEUE_URL;
   };
 
   return { handler, cleanup };

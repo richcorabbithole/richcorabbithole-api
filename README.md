@@ -61,7 +61,7 @@ src/
   researchWorker.js     # SQS research worker (Claude API, S3, DynamoDB)
   writeWorker.js        # SQS writing worker (drafts & revisions)
   lib/
-    worker-utils.js     # Shared worker utilities (AWS clients, helpers)
+    shared-utils.js     # Shared AWS utilities (clients, helpers, SQS send)
 tests/
   hello.test.js         # Tests for health check
   research.test.js      # Tests for accept handler
@@ -71,7 +71,7 @@ tests/
     mock-aws.js         # AWS SDK mock infrastructure
     worker-test-utils.js # Shared worker test behaviors
 scripts/
-  call-research-api.js  # CLI tool with SigV4 signing
+  cli.js                # Unified CLI (research, draft, read-draft)
 .github/workflows/
   test.yml              # Run tests on PRs + EoL check
   deploy-dev.yml        # Deploy on merge to development
@@ -112,26 +112,40 @@ npm run deploy:prod
 
 ## CLI Usage
 
-Trigger research tasks from the command line using IAM-signed requests:
+All pipeline operations go through a single CLI at `scripts/cli.js`:
 
 ```bash
-# Basic usage
+node scripts/cli.js <command> [options]
+```
+
+### Commands
+
+**research** — Trigger a research task via the API (SigV4-signed):
+
+```bash
 npm run research -- --topic "serverless architecture" --profile richcorabbithole
-
-# Specify stage
 npm run research -- --topic "AWS Lambda cold starts" --stage prod --profile richcorabbithole
+```
 
-# Or run directly
-node scripts/call-research-api.js --topic "your topic" --profile richcorabbithole
+**draft** — Enqueue a write job for an already-researched task:
+
+```bash
+npm run draft -- <taskId> --profile richcorabbithole
+```
+
+**read-draft** — Display the current draft for a task:
+
+```bash
+npm run read-draft -- <taskId> --profile richcorabbithole
 ```
 
 ### Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--topic` | (required) | Research topic (max 500 characters) |
+| `--topic` | (required for `research`) | Research topic (max 500 characters) |
 | `--stage` | `dev` | Target stage (`dev` or `prod`) |
-| `--profile` | `AWS_PROFILE` env var | AWS CLI profile for SigV4 signing |
+| `--profile` | `AWS_PROFILE` env var | AWS CLI profile for credentials |
 
 ### Example Output
 

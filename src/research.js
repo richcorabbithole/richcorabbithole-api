@@ -9,14 +9,9 @@
  * Flow: Client → API Gateway → this function → SQS → researchWorker
  */
 
-const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
-const { DynamoDBDocumentClient, PutCommand, UpdateCommand } = require("@aws-sdk/lib-dynamodb");
-const { SQSClient, SendMessageCommand } = require("@aws-sdk/client-sqs");
+const { PutCommand } = require("@aws-sdk/lib-dynamodb");
 const { randomUUID } = require("crypto");
-
-const dynamoClient = new DynamoDBClient({});
-const docClient = DynamoDBDocumentClient.from(dynamoClient);
-const sqsClient = new SQSClient({});
+const { getDocClient, updateTaskStatus, sendSqsMessage } = require("./lib/shared-utils");
 
 module.exports.handler = async (event) => {
   try {
@@ -54,7 +49,7 @@ module.exports.handler = async (event) => {
 
 
     try {
-      await docClient.send(
+      await getDocClient().send(
         new PutCommand({
           TableName: process.env.TABLE_NAME,
           Item: {
@@ -74,37 +69,14 @@ module.exports.handler = async (event) => {
 
     // Place on queue for Research worker to pick up
     try {
-      await sqsClient.send(
-        new SendMessageCommand({
-          QueueUrl: process.env.RESEARCH_QUEUE_URL,
-          MessageBody: JSON.stringify({
-            taskId,
-            topic
-          })
-        })
-      );
+      await sendSqsMessage(process.env.RESEARCH_QUEUE_URL, { taskId, topic });
     } catch (err) {
       const errMsg = 'Failed to place message on queue';
       console.error(errMsg, err);
 
       // Mark the orphaned DynamoDB record as failed so it doesn't appear permanently pending
       try {
-        await docClient.send(
-          new UpdateCommand({
-            TableName: process.env.TABLE_NAME,
-            Key: { taskId },
-            UpdateExpression: "SET #status = :status, updatedAt = :now, #error = :error",
-            ExpressionAttributeNames: {
-              "#status": "status",
-              "#error": "error"
-            },
-            ExpressionAttributeValues: {
-              ":status": "failed",
-              ":now": new Date().toISOString(),
-              ":error": errMsg
-            }
-          })
-        );
+        await updateTaskStatus(taskId, "failed", { error: errMsg });
       } catch (updateErr) {
         console.error('Failed to mark task as failed', updateErr);
       }
