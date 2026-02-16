@@ -15,90 +15,26 @@
  * the message — losing the task forever.
  */
 
-const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
-const { DynamoDBDocumentClient, UpdateCommand, GetCommand } = require("@aws-sdk/lib-dynamodb");
-const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
-const { SecretsManagerClient, GetSecretValueCommand } = require("@aws-sdk/client-secrets-manager");
-
-const dynamoClient = new DynamoDBClient({});
-const docClient = DynamoDBDocumentClient.from(dynamoClient);
-const s3Client = new S3Client({});
-const secretsClient = new SecretsManagerClient({});
-
-let cachedApiKey = null;
-
-async function getAnthropicApiKey() {
-  if (cachedApiKey) return cachedApiKey;
-
-  const response = await secretsClient.send(
-    new GetSecretValueCommand({
-      SecretId: process.env.SECRET_ID
-    })
-  );
-
-  cachedApiKey = response.SecretString;
-  return cachedApiKey;
-}
-
-// Module scoped helper to update the task in Dynamo
-async function updateTaskStatus(taskId, status, extraFields = {}) {
-  const expressionParts = ["#status = :status", "updatedAt = :now"];
-  const attributeNames = { "#status": "status" };
-  const attributeValues = {
-    ":status": status,
-    ":now": new Date().toISOString()
-  };
-
-  for (const [key, value] of Object.entries(extraFields)) {
-    const attrKey = `#${key}`;
-    const valKey = `:${key}`;
-    expressionParts.push(`${attrKey} = ${valKey}`);
-    attributeNames[attrKey] = key;
-    attributeValues[valKey] = value;
-  }
-
-  await docClient.send(
-    new UpdateCommand({
-      TableName: process.env.TABLE_NAME,
-      Key: { taskId },
-      UpdateExpression: `SET ${expressionParts.join(", ")}`,
-      ExpressionAttributeNames: attributeNames,
-      ExpressionAttributeValues: attributeValues
-    })
-  );
-}
+const { GetCommand } = require("@aws-sdk/lib-dynamodb");
+const { PutObjectCommand } = require("@aws-sdk/client-s3");
+const {
+  getDocClient,
+  getS3Client,
+  getAnthropicApiKey,
+  updateTaskStatus,
+  parseSqsMessage
+} = require("./lib/worker-utils");
 
 module.exports.handler = async (event) => {
-  // batchSize is 1 but guard defensively
-  if (!event.Records || event.Records.length === 0) {
-    console.error("No records in SQS event");
-    return;
-  }
+  const msg = parseSqsMessage(event);
+  if (!msg) return;
 
-  const record = event.Records[0];
-
-  // Parse outside the main try — structural failures are handled differently
-  let taskId;
-  let topic;
-  try {
-    const parsed = JSON.parse(record.body);
-    taskId = parsed.taskId;
-    topic = parsed.topic;
-  } catch (parseErr) {
-    // Bad JSON — throw so it retries then lands in DLQ for forensic investigation
-    console.error("Malformed SQS message body:", record.body);
-    throw new Error("Malformed SQS message body");
-  }
-
-  if (!taskId) {
-    // No taskId means no DynamoDB record to update — send to DLQ for investigation
-    console.error("Missing taskId in SQS message:", record.body);
-    throw new Error("Missing taskId in SQS message");
-  }
+  const { taskId, body } = msg;
+  const { topic } = body;
 
   if (!topic) {
     // Has taskId but no topic — mark the existing DynamoDB record as failed, then delete message
-    console.error("Missing topic in SQS message:", record.body);
+    console.error("Missing topic in SQS message:", JSON.stringify(body));
     try {
       await updateTaskStatus(taskId, "failed", { error: "Missing topic in SQS message" });
     } catch (updateErr) {
@@ -109,6 +45,7 @@ module.exports.handler = async (event) => {
 
   try {
     // Check if already processed (idempotency guard for at-least-once delivery)
+    const docClient = getDocClient();
     const existing = await docClient.send(
       new GetCommand({
         TableName: process.env.TABLE_NAME,
@@ -160,6 +97,7 @@ Be thorough but concise. Focus on accuracy and include URLs for all cited source
 
     // Store the research
     const s3Key = `research/${taskId}.md`;
+    const s3Client = getS3Client();
 
     await s3Client.send(
       new PutObjectCommand({
@@ -173,7 +111,7 @@ Be thorough but concise. Focus on accuracy and include URLs for all cited source
     // Update task record to researched
     await updateTaskStatus(taskId, "researched", { s3Key });
 
-    // TODO: Assemble the rest of the agent pipeline, this return is a placeholder 
+    // TODO: Assemble the rest of the agent pipeline, this return is a placeholder
     console.log(`Research complete for task ${taskId}: ${s3Key}`);
     return { taskId, s3Key, status: "researched" };
   } catch (error) {

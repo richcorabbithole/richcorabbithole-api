@@ -14,8 +14,10 @@
 const path = require("path");
 
 // Paths to handler modules (used for cache invalidation)
-const RESEARCH_PATH = path.resolve(__dirname, "../research.js");
-const WORKER_PATH = path.resolve(__dirname, "../researchWorker.js");
+const RESEARCH_PATH = path.resolve(__dirname, "../../src/research.js");
+const WORKER_PATH = path.resolve(__dirname, "../../src/researchWorker.js");
+const WRITE_WORKER_PATH = path.resolve(__dirname, "../../src/writeWorker.js");
+const WORKER_UTILS_PATH = path.resolve(__dirname, "../../src/lib/worker-utils.js");
 
 /**
  * Build a fake module cache entry.
@@ -107,15 +109,24 @@ function setupResearchMocks(mockSend) {
 }
 
 /**
- * Set up mocks for the research worker (src/researchWorker.js).
+ * Set up mocks for an SQS-triggered worker (researchWorker, writeWorker, etc.).
+ *
+ * Base S3 fake always includes PutObjectCommand + GetObjectCommand.
+ * Pass additional S3 command classes via options.extraS3Commands.
  *
  * @param {Function} mockSend - A mock.fn() that all AWS .send() calls route through
  * @param {Function} mockCreate - A mock.fn() for Anthropic messages.create()
+ * @param {object} [options]
+ * @param {string} options.handlerPath - Absolute path to the worker module
+ * @param {object} [options.extraS3Commands] - Extra S3 command classes to include, e.g. { CopyObjectCommand: class { ... } }
  * @returns {{ handler: Function, cleanup: Function }}
  */
-function setupWorkerMocks(mockSend, mockCreate) {
-  // Clear handler from cache
-  delete require.cache[WORKER_PATH];
+function setupWorkerMocks(mockSend, mockCreate, options = {}) {
+  const handlerPath = options.handlerPath || WORKER_PATH;
+
+  // Clear handler and shared lib from cache
+  delete require.cache[handlerPath];
+  delete require.cache[WORKER_UTILS_PATH];
 
   // Fake DynamoDB client
   const dynamoPath = require.resolve("@aws-sdk/client-dynamodb");
@@ -139,16 +150,21 @@ function setupWorkerMocks(mockSend, mockCreate) {
     }
   });
 
-  // Fake S3 client + command
+  // Fake S3 client + commands (base: PutObject + GetObject, plus extras)
   const s3Path = require.resolve("@aws-sdk/client-s3");
-  require.cache[s3Path] = fakeCacheEntry(s3Path, {
+  const s3Exports = {
     S3Client: class {
       send(cmd) { return mockSend(cmd); }
     },
     PutObjectCommand: class PutObjectCommand {
       constructor(params) { this.params = params; this.name = "PutObjectCommand"; }
-    }
-  });
+    },
+    GetObjectCommand: class GetObjectCommand {
+      constructor(params) { this.params = params; this.name = "GetObjectCommand"; }
+    },
+    ...(options.extraS3Commands || {})
+  };
+  require.cache[s3Path] = fakeCacheEntry(s3Path, s3Exports);
 
   // Fake Secrets Manager client + command
   const secretsPath = require.resolve("@aws-sdk/client-secrets-manager");
@@ -177,10 +193,11 @@ function setupWorkerMocks(mockSend, mockCreate) {
   process.env.STAGE = "test";
 
   // Load handler with faked dependencies
-  const handler = require(WORKER_PATH).handler;
+  const handler = require(handlerPath).handler;
 
   const cleanup = () => {
-    delete require.cache[WORKER_PATH];
+    delete require.cache[handlerPath];
+    delete require.cache[WORKER_UTILS_PATH];
     delete require.cache[dynamoPath];
     delete require.cache[libDynamoPath];
     delete require.cache[s3Path];
@@ -195,4 +212,4 @@ function setupWorkerMocks(mockSend, mockCreate) {
   return { handler, cleanup };
 }
 
-module.exports = { setupResearchMocks, setupWorkerMocks };
+module.exports = { setupResearchMocks, setupWorkerMocks, WORKER_PATH, WRITE_WORKER_PATH };
