@@ -432,6 +432,127 @@ describe("publishWorker handler", () => {
     });
   });
 
+  // --- Retry: PR creation returns 422 (PR already exists) ---
+
+  describe("retry: PR creation 422 with existing PR", () => {
+    it("finds existing PR and succeeds when PR creation returns 422", async () => {
+      const httpsCalls = [];
+      githubRoutes = (method, path, requestBody) => {
+        httpsCalls.push({ method, path, requestBody });
+
+        // PR creation → 422 (already exists)
+        if (method === "POST" && path.includes("/pulls") && !path.includes("/access_tokens") && !path.includes("/git/refs")) {
+          return {
+            statusCode: 422,
+            body: { message: "A pull request already exists for richcorabbithole:post/test-post-title." }
+          };
+        }
+        // List PRs → existing PR found
+        if (method === "GET" && path.includes("/pulls")) {
+          return {
+            statusCode: 200,
+            body: [{
+              html_url: "https://github.com/richcorabbithole/richcorabbithole-site/pull/77",
+              number: 77
+            }]
+          };
+        }
+        return defaultGitHubRoutes(method, path, requestBody);
+      };
+
+      const result = await handler(sqsEvent({ taskId: "t1" }));
+      assert.strictEqual(result.status, "published");
+      assert.strictEqual(result.prUrl, "https://github.com/richcorabbithole/richcorabbithole-site/pull/77");
+      assert.strictEqual(result.prNumber, 77);
+
+      // Verify DynamoDB was updated with the existing PR info
+      const updateCalls = mockSend.mock.calls.filter(
+        c => c.arguments[0].name === "UpdateCommand"
+      );
+      const publishedUpdate = updateCalls.find(
+        c => c.arguments[0].params.ExpressionAttributeValues[":status"] === "published"
+      );
+      assert.ok(publishedUpdate, "Expected published status update");
+    });
+
+    it("re-throws 422 when no existing PR is found", async () => {
+      githubRoutes = (method, path, requestBody) => {
+        // PR creation → 422
+        if (method === "POST" && path.includes("/pulls") && !path.includes("/access_tokens") && !path.includes("/git/refs")) {
+          return { statusCode: 422, body: { message: "Validation Failed" } };
+        }
+        // List PRs → empty (no existing PR)
+        if (method === "GET" && path.includes("/pulls")) {
+          return { statusCode: 200, body: [] };
+        }
+        return defaultGitHubRoutes(method, path, requestBody);
+      };
+
+      await assert.rejects(
+        () => handler(sqsEvent({ taskId: "t1" })),
+        (err) => err.message.includes("422")
+      );
+    });
+
+    it("re-throws non-422 PR creation errors", async () => {
+      githubRoutes = (method, path, requestBody) => {
+        if (method === "POST" && path.includes("/pulls") && !path.includes("/access_tokens") && !path.includes("/git/refs")) {
+          return { statusCode: 500, body: { message: "Internal Server Error" } };
+        }
+        return defaultGitHubRoutes(method, path, requestBody);
+      };
+
+      await assert.rejects(
+        () => handler(sqsEvent({ taskId: "t1" })),
+        (err) => err.message.includes("500")
+      );
+    });
+  });
+
+  // --- Empty slug fallback ---
+
+  describe("empty slug fallback", () => {
+    it("uses taskId-based slug when title produces empty slug", async () => {
+      const httpsCalls = [];
+      // Provide a post with a title that slugifies to empty string (all special chars)
+      const specialPost = `---
+title: "!!!"
+description: "test"
+publishDate: "2026-02-17"
+hyperfixation: "tech"
+researchDepth: 3
+tags:
+  - test
+draft: true
+---
+
+# Content here`;
+
+      mockSend.mock.mockImplementation(async (cmd) => {
+        if (cmd.name === "GetObjectCommand") {
+          return {
+            Body: { transformToString: async () => specialPost }
+          };
+        }
+        return defaultMockSend(cmd);
+      });
+
+      githubRoutes = (method, path, requestBody) => {
+        httpsCalls.push({ method, path, requestBody });
+        return defaultGitHubRoutes(method, path, requestBody);
+      };
+
+      const result = await handler(sqsEvent({ taskId: "t1" }));
+      assert.strictEqual(result.status, "published");
+
+      // Verify branch name uses taskId fallback
+      const branchCall = httpsCalls.find(c => c.method === "POST" && c.path.includes("/git/refs"));
+      assert.ok(branchCall, "Expected branch creation call");
+      const branchBody = JSON.parse(branchCall.requestBody);
+      assert.ok(branchBody.ref.includes("post/post-t1"), "Branch should use taskId-based fallback slug");
+    });
+  });
+
   // --- Error handling ---
 
   describe("error handling", () => {

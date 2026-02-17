@@ -187,7 +187,7 @@ module.exports.handler = async (event) => {
     // Parse frontmatter for metadata
     const { frontmatter, body } = parseFrontmatter(postContent);
     const title = frontmatter.title || `post-${taskId.slice(0, 8)}`;
-    const slug = slugify(title);
+    const slug = slugify(title) || `post-${taskId.slice(0, 8)}`;
     const wordCount = countWords(body);
 
     // Get GitHub token
@@ -284,17 +284,38 @@ module.exports.handler = async (event) => {
 
     // Step 4: Create the PR
     const prBody = buildPrBody(frontmatter, wordCount, taskId);
-    const pr = await githubApiRequest(
-      "POST",
-      `${repoPath}/pulls`,
-      token,
-      {
-        title: `New post: ${title}`,
-        body: prBody,
-        head: branchName,
-        base: BASE_BRANCH
+    let pr;
+    try {
+      pr = await githubApiRequest(
+        "POST",
+        `${repoPath}/pulls`,
+        token,
+        {
+          title: `New post: ${title}`,
+          body: prBody,
+          head: branchName,
+          base: BASE_BRANCH
+        }
+      );
+    } catch (err) {
+      // 422 means a PR already exists for this head/base — treat as idempotent
+      if (err.statusCode === 422) {
+        console.log(`PR creation returned 422 — checking for existing PR on ${branchName}`);
+        const prs = await githubApiRequest(
+          "GET",
+          `${repoPath}/pulls?head=${GITHUB_OWNER}:${branchName}&base=${BASE_BRANCH}&state=open`,
+          token
+        );
+        if (prs.length > 0) {
+          pr = prs[0];
+          console.log(`Existing PR found: ${pr.html_url}`);
+        } else {
+          throw err;
+        }
+      } else {
+        throw err;
       }
-    );
+    }
 
     // Update task record
     await updateTaskStatus(taskId, "published", {
