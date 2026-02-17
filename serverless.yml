@@ -23,7 +23,9 @@ provider:
         - Effect: Allow
           Action:
             - secretsmanager:GetSecretValue
-          Resource: arn:aws:secretsmanager:us-east-1:444739497441:secret:richcorabbithole/*
+          Resource:
+            - arn:aws:secretsmanager:us-east-1:444739497441:secret:richcorabbithole/anthropic-api-key-*
+            - arn:aws:secretsmanager:us-east-1:444739497441:secret:richcorabbithole/github-app-*
         - Effect: Allow
           Action:
             - s3:GetObject

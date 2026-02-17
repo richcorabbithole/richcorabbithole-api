@@ -245,16 +245,42 @@ module.exports.handler = async (event) => {
     const filePath = `${BLOG_PATH_PREFIX}/${slug}.md`;
     const encodedContent = Buffer.from(postContent).toString("base64");
 
-    await githubApiRequest(
-      "PUT",
-      `${repoPath}/contents/${filePath}`,
-      token,
-      {
+    // Check if file already exists on branch (handles retry after partial success).
+    // The prior attempt may have committed the file but failed before creating the PR.
+    let skipCommit = false;
+    let existingFileSha = null;
+    try {
+      const existing = await githubApiRequest(
+        "GET",
+        `${repoPath}/contents/${filePath}?ref=${branchName}`,
+        token
+      );
+      if (existing.content?.replace(/\n/g, "") === encodedContent) {
+        console.log(`File already committed with matching content, skipping PUT`);
+        skipCommit = true;
+      } else {
+        existingFileSha = existing.sha;
+        console.log(`File exists with different content, will update (sha: ${existingFileSha})`);
+      }
+    } catch (err) {
+      if (err.statusCode === 404) {
+        // File doesn't exist yet — normal first-attempt path
+      } else {
+        throw err;
+      }
+    }
+
+    if (!skipCommit) {
+      const commitPayload = {
         message: `Add blog post: ${title}`,
         content: encodedContent,
         branch: branchName
+      };
+      if (existingFileSha) {
+        commitPayload.sha = existingFileSha;
       }
-    );
+      await githubApiRequest("PUT", `${repoPath}/contents/${filePath}`, token, commitPayload);
+    }
 
     // Step 4: Create the PR
     const prBody = buildPrBody(frontmatter, wordCount, taskId);
