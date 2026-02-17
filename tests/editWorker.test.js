@@ -175,6 +175,23 @@ describe("editWorker handler", () => {
       assert.strictEqual(result.status, "already_processed");
       assert.strictEqual(mockCreate.mock.calls.length, 0);
     });
+
+    it("allows retry when status is editing (SQS retry after crash)", async () => {
+      mockSend.mock.mockImplementation(async (cmd) => {
+        if (cmd.name === "GetCommand") {
+          return {
+            Item: { taskId: "t1", status: "editing", draftS3Key: "drafts/t1.md" }
+          };
+        }
+        return defaultMockSend(cmd);
+      });
+
+      const result = await handler(sqsEvent({ taskId: "t1" }));
+
+      // Should complete successfully, not mark as failed
+      assert.strictEqual(result.status, "edited");
+      assert.strictEqual(mockCreate.mock.calls.length, 1);
+    });
   });
 
   // --- Happy path ---

@@ -148,6 +148,23 @@ describe("seoWorker handler", () => {
       assert.strictEqual(result.status, "already_ready");
       assert.strictEqual(mockCreate.mock.calls.length, 0);
     });
+
+    it("allows retry when status is optimizing (SQS retry after crash)", async () => {
+      mockSend.mock.mockImplementation(async (cmd) => {
+        if (cmd.name === "GetCommand") {
+          return {
+            Item: { taskId: "t1", status: "optimizing", editedS3Key: "edited/t1.md" }
+          };
+        }
+        return defaultMockSend(cmd);
+      });
+
+      const result = await handler(sqsEvent({ taskId: "t1" }));
+
+      // Should complete successfully, not mark as failed
+      assert.strictEqual(result.status, "ready");
+      assert.strictEqual(mockCreate.mock.calls.length, 1);
+    });
   });
 
   // --- Happy path ---

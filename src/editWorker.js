@@ -55,15 +55,18 @@ module.exports.handler = async (event) => {
 
     const task = existing.Item;
 
-    // Idempotency: if already edited or further along, skip
+    // Idempotency: if already completed (edited or beyond), skip
     const completedStatuses = ["edited", "optimizing", "ready"];
     if (completedStatuses.includes(task.status)) {
       console.log(`Task ${taskId} already processed (status: ${task.status}), skipping`);
       return { taskId, status: "already_processed" };
     }
 
-    // Only process tasks in expected status
-    if (task.status !== "drafted") {
+    // Allow retries for in-progress editing or expected drafted status
+    const isExpected = task.status === "drafted";
+    const isRetry = task.status === "editing";
+
+    if (!isExpected && !isRetry) {
       console.error(`Task ${taskId} has unexpected status: ${task.status}`);
       await updateTaskStatus(taskId, "failed", {
         error: `Cannot edit from status: ${task.status}`
@@ -76,8 +79,10 @@ module.exports.handler = async (event) => {
       throw new Error(`Task ${taskId} has no draft draftS3Key`);
     }
 
-    // Update status to editing
-    await updateTaskStatus(taskId, "editing");
+    // Update status to editing (idempotent if already editing)
+    if (task.status !== "editing") {
+      await updateTaskStatus(taskId, "editing");
+    }
 
     // Fetch the draft from S3
     const draftContent = await getS3Object(task.draftS3Key);

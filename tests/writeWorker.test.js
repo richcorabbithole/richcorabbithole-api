@@ -179,6 +179,23 @@ describe("writeWorker handler", () => {
       assert.strictEqual(result.status, "already_processed");
       assert.strictEqual(mockCreate.mock.calls.length, 0);
     });
+
+    it("allows retry when status is writing (SQS retry after crash)", async () => {
+      mockSend.mock.mockImplementation(async (cmd) => {
+        if (cmd.name === "GetCommand") {
+          return {
+            Item: { taskId: "t1", status: "writing", s3Key: "research/t1.md" }
+          };
+        }
+        return defaultMockSend(cmd);
+      });
+
+      const result = await handler(sqsEvent({ taskId: "t1" }));
+
+      // Should complete successfully, not mark as failed
+      assert.strictEqual(result.status, "drafted");
+      assert.strictEqual(mockCreate.mock.calls.length, 1);
+    });
   });
 
   // --- First draft happy path ---

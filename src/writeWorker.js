@@ -89,18 +89,19 @@ module.exports.handler = async (event) => {
 
     const task = existing.Item;
 
-    // Idempotency: if already drafted or further along, skip
+    // Idempotency: if already completed (drafted or beyond), skip
     const completedStatuses = ["drafted", "editing", "edited", "optimizing", "ready"];
     if (completedStatuses.includes(task.status)) {
       console.log(`Task ${taskId} already processed (status: ${task.status}), skipping`);
       return { taskId, status: "already_processed" };
     }
 
-    // Only process tasks in expected statuses
+    // Allow retries for in-progress writing
     const isRevision = task.status === "revision_requested";
     const isFirstDraft = task.status === "researched";
+    const isRetry = task.status === "writing";
 
-    if (!isFirstDraft && !isRevision) {
+    if (!isFirstDraft && !isRevision && !isRetry) {
       console.error(`Task ${taskId} has unexpected status: ${task.status}`);
       await updateTaskStatus(taskId, "failed", {
         error: `Cannot write from status: ${task.status}`
@@ -113,8 +114,10 @@ module.exports.handler = async (event) => {
       throw new Error(`Task ${taskId} has no research s3Key`);
     }
 
-    // Update status to writing
-    await updateTaskStatus(taskId, "writing");
+    // Update status to writing (idempotent if already writing)
+    if (task.status !== "writing") {
+      await updateTaskStatus(taskId, "writing");
+    }
 
     // Fetch the research from S3
     const researchContent = await getS3Object(task.s3Key);

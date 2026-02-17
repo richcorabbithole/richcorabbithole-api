@@ -52,14 +52,17 @@ module.exports.handler = async (event) => {
 
     const task = existing.Item;
 
-    // Idempotency: if already optimized, skip
+    // Idempotency: if already completed, skip
     if (task.status === "ready") {
       console.log(`Task ${taskId} already SEO-optimized, skipping`);
       return { taskId, status: "already_ready" };
     }
 
-    // Only process tasks in expected status
-    if (task.status !== "edited") {
+    // Allow retries for in-progress optimizing or expected edited status
+    const isExpected = task.status === "edited";
+    const isRetry = task.status === "optimizing";
+
+    if (!isExpected && !isRetry) {
       console.error(`Task ${taskId} has unexpected status: ${task.status}`);
       await updateTaskStatus(taskId, "failed", {
         error: `Cannot optimize SEO from status: ${task.status}`
@@ -72,8 +75,10 @@ module.exports.handler = async (event) => {
       throw new Error(`Task ${taskId} has no edited editedS3Key`);
     }
 
-    // Update status to optimizing
-    await updateTaskStatus(taskId, "optimizing");
+    // Update status to optimizing (idempotent if already optimizing)
+    if (task.status !== "optimizing") {
+      await updateTaskStatus(taskId, "optimizing");
+    }
 
     // Fetch the edited content from S3
     const editedContent = await getS3Object(task.editedS3Key);
