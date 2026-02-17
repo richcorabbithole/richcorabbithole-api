@@ -37,11 +37,15 @@ REMOVE these patterns:
 - Rhetorical questions as hooks (genuine questions in the narrative are fine)
 - Breathless excitement that undermines credibility
 - Academic distance that makes it feel like a journal article
+- Forced "rabbit hole" references (the blog name is richcorabbithole, but don't overuse the metaphor)
+- Fictional anecdotes, invented friends, or made-up scenarios ("a friend told me", "I once knew someone")
+- Origin story openings ("I stumbled into this when...") — just start with the topic
 
 ADD if missing:
-- Personal voice and reactions ("I", "This surprised me")
+- Personal voice for reactions to research ("I", "This surprised me"), not invented stories
 - Specific details over vague claims
 - The thinking process, not just conclusions
+- Direct openings that get to the interesting part immediately
 
 Do NOT add new sections or significantly expand the content. Focus on making what's there better and more authentic.
 Do NOT include any text before the opening --- or after the post content.
