@@ -202,7 +202,8 @@ module.exports.handler = async (event) => {
     const revisionCount = isRevision ? (task.revisionCount || 0) + 1 : 0;
     await updateTaskStatus(taskId, "drafted", {
       draftS3Key,
-      revisionCount
+      revisionCount,
+      draftedAt: new Date().toISOString()
     });
 
     // Enqueue edit job — non-fatal since draft is already persisted.

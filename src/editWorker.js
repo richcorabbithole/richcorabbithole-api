@@ -141,7 +141,7 @@ module.exports.handler = async (event) => {
     );
 
     // Update task record
-    await updateTaskStatus(taskId, "edited", { editedS3Key });
+    await updateTaskStatus(taskId, "edited", { editedS3Key, editedAt: new Date().toISOString() });
 
     // Enqueue SEO job — non-fatal since edited content is already persisted.
     // If this fails, the task stays "edited" and can be re-triggered manually.

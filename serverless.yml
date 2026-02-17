@@ -39,7 +39,9 @@ provider:
             - dynamodb:PutItem
             - dynamodb:UpdateItem
             - dynamodb:Query
-          Resource: arn:aws:dynamodb:us-east-1:444739497441:table/${self:custom.tableName}
+          Resource:
+            - arn:aws:dynamodb:us-east-1:444739497441:table/${self:custom.tableName}
+            - arn:aws:dynamodb:us-east-1:444739497441:table/${self:custom.tableName}/index/*
         - Effect: Allow
           Action:
             - sqs:SendMessage
@@ -362,9 +364,18 @@ resources:
         AttributeDefinitions:
           - AttributeName: taskId
             AttributeType: S
+          - AttributeName: status
+            AttributeType: S
         KeySchema:
           - AttributeName: taskId
             KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: status-index
+            KeySchema:
+              - AttributeName: status
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
         Tags:
           - Key: Project
             Value: richcorabbithole

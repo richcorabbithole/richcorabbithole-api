@@ -128,7 +128,7 @@ module.exports.handler = async (event) => {
     );
 
     // Update task record - status "ready" means ready for publication
-    await updateTaskStatus(taskId, "ready", { finalS3Key });
+    await updateTaskStatus(taskId, "ready", { finalS3Key, readyAt: new Date().toISOString() });
 
     console.log(`SEO optimization complete for task ${taskId}: ${finalS3Key} - ready for publication`);
 

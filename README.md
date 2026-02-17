@@ -71,7 +71,7 @@ Client (CLI) ─── POST /research ───> API Gateway (IAM auth)
 - **API Gateway** - REST endpoint with IAM authorization
 - **SQS** - Async job queue with dead letter queue
 - **S3** - Research content storage (`richcorabbithole-research-{stage}`)
-- **DynamoDB** - Task tracking (`richcorabbithole-tasks-{stage}`)
+- **DynamoDB** - Task tracking (`richcorabbithole-tasks-{stage}`, GSI on `status` for querying by pipeline stage)
 - **Secrets Manager** - Claude API key storage
 
 ## Project Structure
@@ -97,7 +97,7 @@ tests/
     mock-aws.js         # AWS SDK mock infrastructure
     worker-test-utils.js # Shared worker test behaviors
 scripts/
-  cli.js                # Unified CLI (research, draft, read-draft)
+  cli.js                # Unified CLI (publish, research, draft, read-draft)
 .github/workflows/
   test.yml              # Run tests on PRs + EoL check
   deploy-dev.yml        # Deploy on merge to development
@@ -146,6 +146,13 @@ node scripts/cli.js <command> [options]
 
 ### Commands
 
+**publish** — Run the full pipeline with live progress (Research → Write → Edit → SEO):
+
+```bash
+node scripts/cli.js publish "quantum computing" --category tech --profile richcorabbithole
+node scripts/cli.js publish "black holes" --category science --stage prod --profile richcorabbithole
+```
+
 **research** — Trigger a research task via the API (SigV4-signed):
 
 ```bash
@@ -170,10 +177,46 @@ npm run read-draft -- <taskId> --profile richcorabbithole
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--topic` | (required for `research`) | Research topic (max 500 characters) |
+| `--category` | (optional) | Blog category: `tech`, `science`, `history`, `gaming`, `maker`, `other` |
 | `--stage` | `dev` | Target stage (`dev` or `prod`) |
 | `--profile` | `AWS_PROFILE` env var | AWS CLI profile for credentials |
 
-### Example Output
+### Example: `publish`
+
+```
+🚀 Starting pipeline (dev)...
+📝 Topic: quantum computing
+🏷️  Category: tech
+
+✅ Pipeline started — task ID: a1b2c3d4-...
+
+[3s] Starting...
+[6s] Researching...
+[45s] Research complete
+[48s] Writing draft...
+[120s] Draft complete
+[123s] Editing...
+[150s] Edit complete
+[153s] SEO optimization...
+[165s] Complete!
+
+--- Summary ---
+Task ID:  a1b2c3d4-...
+S3 file:  final/a1b2c3d4-....md
+
+Stage timestamps:
+  Researched: 2026-02-17T10:00:45Z
+  Drafted:    2026-02-17T10:02:00Z
+  Edited:     2026-02-17T10:02:30Z
+  Ready:      2026-02-17T10:02:45Z
+
+Title: Quantum Computing: From Qubits to Error Correction
+Word count: 1247
+
+Total time: 165s
+```
+
+### Example: `research`
 
 ```
 📡 Calling research API (dev)...
@@ -191,7 +234,9 @@ npm run read-draft -- <taskId> --profile richcorabbithole
 💡 Track your task: GET /research/a1b2c3d4-...
 ```
 
-The pipeline picks up the task from SQS and progresses it through stages. Task status progresses: `pending` → `researching` → `researched` → `writing` → `drafted` → `editing` → `edited` → `optimizing` → `ready` (or `failed` at any step).
+### Pipeline Status Flow
+
+Task status progresses: `pending` → `researching` → `researched` → `writing` → `drafted` → `editing` → `edited` → `optimizing` → `ready` (or `failed` at any step).
 
 ## Stages
 
