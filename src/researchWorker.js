@@ -103,7 +103,7 @@ Be thorough but concise. Focus on accuracy and include URLs for all cited source
     );
 
     // Update task record to researched
-    await updateTaskStatus(taskId, "researched", { s3Key });
+    await updateTaskStatus(taskId, "researched", { s3Key, researchedAt: new Date().toISOString() });
 
     // Enqueue write job — non-fatal since research is already persisted.
     // If this fails, the task stays "researched" and can be re-triggered via cli.js draft.

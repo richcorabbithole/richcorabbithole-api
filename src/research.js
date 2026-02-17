@@ -26,7 +26,7 @@ module.exports.handler = async (event) => {
       };
     }
 
-    const { topic } = body;
+    const { topic, category } = body;
 
     if (!topic || typeof topic !== "string") {
       return {
@@ -42,23 +42,32 @@ module.exports.handler = async (event) => {
       };
     }
 
+    const VALID_CATEGORIES = ["tech", "science", "history", "gaming", "maker", "other"];
+    if (category !== undefined && !VALID_CATEGORIES.includes(category)) {
+      return {
+        statusCode: 400,
+        body: JSON.stringify({ error: `Invalid category. Must be one of: ${VALID_CATEGORIES.join(", ")}` })
+      };
+    }
+
     const taskId = randomUUID();
     const now = new Date().toISOString();
 
     // Place Dynamo Record with a pending status for tracking through pipeline
-
+    const item = {
+      taskId,
+      status: "pending",
+      topic,
+      createdAt: now,
+      updatedAt: now
+    };
+    if (category) item.category = category;
 
     try {
       await getDocClient().send(
         new PutCommand({
           TableName: process.env.TABLE_NAME,
-          Item: {
-            taskId,
-            status: "pending",
-            topic,
-            createdAt: now,
-            updatedAt: now
-          }
+          Item: item
         })
       );
     } catch (err) {
@@ -69,7 +78,7 @@ module.exports.handler = async (event) => {
 
     // Place on queue for Research worker to pick up
     try {
-      await sendSqsMessage(process.env.RESEARCH_QUEUE_URL, { taskId, topic });
+      await sendSqsMessage(process.env.RESEARCH_QUEUE_URL, { taskId, topic, category });
     } catch (err) {
       const errMsg = 'Failed to place message on queue';
       console.error(errMsg, err);
