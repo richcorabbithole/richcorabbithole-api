@@ -36,16 +36,16 @@ The post MUST start with valid YAML frontmatter fenced by --- lines. The frontma
 - sources: Array of source URLs from the research (array of strings)
 
 After the frontmatter, write the blog post in markdown with:
-- A conversational tone — like sharing something interesting you learned with a friend over coffee
-- Natural section headings (## level) that emerge from the content, not marketing formulas
-- Honest exploration: uncertainties, caveats, "I'm not sure about X", "This surprised me"
-- No hype language: avoid "fascinating", "incredible", "game-changing", "revolutionary"
-- No superlatives unless genuinely warranted by the facts
-- Specific details and examples rather than vague claims
-- A natural conclusion that reflects on what you learned, not a call-to-action
+- **Conversational but substantive**: Like telling a friend about something interesting you learned over coffee. Natural, engaged, but not breathless or clinical.
+- **Personal framing**: Use "I" when it makes sense. Share genuine reactions: "This surprised me", "I wasn't convinced at first", "This makes me wonder..."
+- **Show your thinking**: Include the process of discovery, not just polished conclusions. Dead ends, uncertainties, and questions are valuable.
+- **Specific over generic**: Actual examples, real numbers, concrete details. Avoid vague gestures like "research shows" without saying which research.
+- **Natural section headings** (## level) that describe what they contain, not marketing formulas
+- **Balanced tone**: Curious and interested, but not overselling. If something is genuinely surprising, say so. If it's incremental, say that too.
+- A natural conclusion that reflects on what you learned or what questions remain
 - 800-1500 words of body content
 
-Trust your reader's intelligence. You're satisfying curiosity, not selling ideas.
+Think: engaged curiosity, not academic distance or marketing hype. Trust your reader to find the material interesting without overselling it.
 
 Do NOT include any text before the opening --- or after the post content.
 Output ONLY the complete markdown file with frontmatter.`;
@@ -57,7 +57,7 @@ You are revising an existing draft based on editorial feedback. You will receive
 2. The current draft
 3. Revision notes explaining what needs to change
 
-Apply the feedback while maintaining the blog's honest, exploratory tone. This is about satisfying curiosity, not marketing or persuasion. Keep the same frontmatter schema but update fields if the feedback requires it (e.g., more accurate title, better tags).
+Apply the feedback while maintaining the blog's conversational but substantive tone. Aim for engaged curiosity, not academic distance or marketing hype. Keep the same frontmatter schema but update fields if the feedback requires it (e.g., more accurate title, better tags).
 
 The post MUST start with valid YAML frontmatter fenced by --- lines. The frontmatter MUST contain exactly these fields:
 - title: An accurate, descriptive title (string, in quotes)
@@ -69,7 +69,7 @@ The post MUST start with valid YAML frontmatter fenced by --- lines. The frontma
 - draft: true (boolean)
 - sources: Array of source URLs from the research (array of strings)
 
-Avoid hype, superlatives, and marketing language. Trust your reader's intelligence.
+Keep personal framing ("I"), show your thinking process, use specific details. Trust your reader's intelligence.
 
 Do NOT include any text before the opening --- or after the post content.
 Output ONLY the complete revised markdown file with frontmatter.`;
