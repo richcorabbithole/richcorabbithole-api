@@ -14,7 +14,7 @@
 
 const { GetCommand } = require("@aws-sdk/lib-dynamodb");
 const { PutObjectCommand } = require("@aws-sdk/client-s3");
-const { getDocClient, getS3Client, getS3Object, getAnthropicApiKey, updateTaskStatus, parseSqsMessage } = require("./lib/shared-utils");
+const { getDocClient, getS3Client, getS3Object, getAnthropicApiKey, updateTaskStatus, parseSqsMessage, sendSqsMessage } = require("./lib/shared-utils");
 
 const SEO_SYSTEM_PROMPT = `You are an SEO specialist for richcorabbithole — a blog about going deep on random topics (hyperfixations).
 
@@ -131,6 +131,19 @@ module.exports.handler = async (event) => {
     await updateTaskStatus(taskId, "ready", { finalS3Key, readyAt: new Date().toISOString() });
 
     console.log(`SEO optimization complete for task ${taskId}: ${finalS3Key} - ready for publication`);
+
+    // Enqueue publish job — non-fatal since final content is already persisted.
+    // If this fails, the task stays "ready" and can be re-triggered manually.
+    try {
+      if (!process.env.PUBLISH_QUEUE_URL) {
+        console.error(`PUBLISH_QUEUE_URL not set — skipping publish enqueue for task ${taskId}`);
+      } else {
+        await sendSqsMessage(process.env.PUBLISH_QUEUE_URL, { taskId });
+        console.log(`SEO complete for task ${taskId} — publish job enqueued`);
+      }
+    } catch (enqueueErr) {
+      console.error(`SEO saved but failed to enqueue publish job for ${taskId}:`, enqueueErr);
+    }
 
     return { taskId, finalS3Key, status: "ready" };
   } catch (error) {

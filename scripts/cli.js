@@ -4,7 +4,7 @@
  * Unified CLI for the richcorabbithole pipeline.
  *
  * Subcommands:
- *   publish <topic>           — Run the full pipeline (Research → Write → Edit → SEO) with live progress
+ *   publish <topic>           — Run the full pipeline (Research → Write → Edit → SEO → Publish) with live progress
  *   research --topic <topic>  — Trigger a research task via the API (SigV4-signed)
  *   draft <taskId>            — Enqueue a write job for an already-researched task
  *   read-draft <taskId>       — Display the current draft for a task
@@ -452,11 +452,13 @@ async function publishCommand(publishTopic) {
     editing:      "Editing...",
     edited:       "Edit complete",
     optimizing:   "SEO optimization...",
-    ready:        "Complete!",
+    ready:        "SEO complete",
+    publishing:   "Creating PR...",
+    published:    "Published!",
     failed:       null  // handled separately
   };
 
-  const TERMINAL_STATUSES = ["ready", "failed"];
+  const TERMINAL_STATUSES = ["published", "failed"];
 
   const clientConfig = makeClientConfig();
   const dynamoClient = new DynamoDBClient(clientConfig);
@@ -499,19 +501,27 @@ async function publishCommand(publishTopic) {
     }
 
     if (TERMINAL_STATUSES.includes(status)) {
-      if (status === "ready") {
+      if (status === "published") {
         const totalSecs = ((Date.now() - startTime) / 1000).toFixed(0);
         console.log();
         console.log("--- Summary ---");
         console.log(`Task ID:  ${taskId}`);
         console.log(`S3 file:  ${task.finalS3Key}`);
 
+        if (task.prUrl) {
+          console.log(`PR:       ${task.prUrl}`);
+        }
+        if (task.branchName) {
+          console.log(`Branch:   ${task.branchName}`);
+        }
+
         // Print stage timestamps if available
         const timestamps = {};
-        if (task.researchedAt) timestamps["Researched"] = task.researchedAt;
-        if (task.draftedAt)    timestamps["Drafted"]    = task.draftedAt;
-        if (task.editedAt)     timestamps["Edited"]     = task.editedAt;
-        if (task.readyAt)      timestamps["Ready"]      = task.readyAt;
+        if (task.researchedAt)  timestamps["Researched"] = task.researchedAt;
+        if (task.draftedAt)     timestamps["Drafted"]    = task.draftedAt;
+        if (task.editedAt)      timestamps["Edited"]     = task.editedAt;
+        if (task.readyAt)       timestamps["Ready"]      = task.readyAt;
+        if (task.publishedAt)   timestamps["Published"]  = task.publishedAt;
 
         if (Object.keys(timestamps).length > 0) {
           console.log("\nStage timestamps:");

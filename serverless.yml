@@ -23,7 +23,9 @@ provider:
         - Effect: Allow
           Action:
             - secretsmanager:GetSecretValue
-          Resource: arn:aws:secretsmanager:us-east-1:444739497441:secret:richcorabbithole/anthropic-api-key-*
+          Resource:
+            - arn:aws:secretsmanager:us-east-1:444739497441:secret:richcorabbithole/anthropic-api-key-*
+            - arn:aws:secretsmanager:us-east-1:444739497441:secret:richcorabbithole/github-app-*
         - Effect: Allow
           Action:
             - s3:GetObject
@@ -50,6 +52,7 @@ provider:
             - !GetAtt WriteQueue.Arn
             - !GetAtt EditQueue.Arn
             - !GetAtt SeoQueue.Arn
+            - !GetAtt PublishQueue.Arn
   tags:
     Project: richcorabbithole
     Environment: ${self:provider.stage}
@@ -145,9 +148,24 @@ functions:
       TABLE_NAME: ${self:custom.tableName}
       SECRET_ID: richcorabbithole/anthropic-api-key
       STAGE: ${self:custom.stage}
+      PUBLISH_QUEUE_URL: !Ref PublishQueue
     events:
       - sqs:
           arn: !GetAtt SeoQueue.Arn
+          batchSize: 1
+
+  # Worker function: triggered by SQS, creates a PR on richcorabbithole-site (up to 1 min)
+  publishWorker:
+    handler: src/publishWorker.handler
+    timeout: 60
+    memorySize: 512
+    environment:
+      BUCKET_NAME: ${self:custom.bucketName}
+      TABLE_NAME: ${self:custom.tableName}
+      STAGE: ${self:custom.stage}
+    events:
+      - sqs:
+          arn: !GetAtt PublishQueue.Arn
           batchSize: 1
 
 resources:
@@ -341,6 +359,44 @@ resources:
         SqsManagedSseEnabled: true
         RedrivePolicy:
           deadLetterTargetArn: !GetAtt SeoDLQ.Arn
+          maxReceiveCount: 2
+        Tags:
+          - Key: Project
+            Value: richcorabbithole
+          - Key: Environment
+            Value: ${self:custom.stage}
+          - Key: ManagedBy
+            Value: serverless
+
+    # Dead letter queue for publishWorker — receives messages that failed processing after maxReceiveCount attempts
+    PublishDLQ:
+      Type: AWS::SQS::Queue
+      DeletionPolicy: Retain
+      UpdateReplacePolicy: Retain
+      Properties:
+        QueueName: richcorabbithole-publish-dlq-${self:custom.stage}
+        MessageRetentionPeriod: 1209600
+        SqsManagedSseEnabled: true
+        Tags:
+          - Key: Project
+            Value: richcorabbithole
+          - Key: Environment
+            Value: ${self:custom.stage}
+          - Key: ManagedBy
+            Value: serverless
+
+    # Main publish queue — the seoWorker sends messages here, the publishWorker consumes them
+    PublishQueue:
+      Type: AWS::SQS::Queue
+      DeletionPolicy: Retain
+      UpdateReplacePolicy: Retain
+      Properties:
+        QueueName: richcorabbithole-publish-queue-${self:custom.stage}
+        VisibilityTimeout: 120
+        MessageRetentionPeriod: 86400
+        SqsManagedSseEnabled: true
+        RedrivePolicy:
+          deadLetterTargetArn: !GetAtt PublishDLQ.Arn
           maxReceiveCount: 2
         Tags:
           - Key: Project

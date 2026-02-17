@@ -19,6 +19,7 @@ const WORKER_PATH = path.resolve(__dirname, "../../src/researchWorker.js");
 const WRITE_WORKER_PATH = path.resolve(__dirname, "../../src/writeWorker.js");
 const EDIT_WORKER_PATH = path.resolve(__dirname, "../../src/editWorker.js");
 const SEO_WORKER_PATH = path.resolve(__dirname, "../../src/seoWorker.js");
+const PUBLISH_WORKER_PATH = path.resolve(__dirname, "../../src/publishWorker.js");
 const SHARED_UTILS_PATH = path.resolve(__dirname, "../../src/lib/shared-utils.js");
 
 /**
@@ -253,4 +254,123 @@ function setupWorkerMocks(mockSend, mockCreate, options = {}) {
   return { handler, cleanup };
 }
 
-module.exports = { setupResearchMocks, setupWorkerMocks, WORKER_PATH, WRITE_WORKER_PATH, EDIT_WORKER_PATH, SEO_WORKER_PATH };
+/**
+ * Set up mocks for the publishWorker (src/publishWorker.js).
+ *
+ * Like setupWorkerMocks but replaces the Anthropic SDK mock with a fake `https`
+ * module, since publishWorker uses githubApiRequest (raw https) instead of Claude.
+ *
+ * @param {Function} mockSend - A mock.fn() that all AWS .send() calls route through
+ * @param {Function} mockHttpsRequest - A mock.fn(options, callback) for https.request
+ * @returns {{ handler: Function, cleanup: Function }}
+ */
+function setupPublishWorkerMocks(mockSend, mockHttpsRequest) {
+  // Clear handler and shared lib from cache
+  delete require.cache[PUBLISH_WORKER_PATH];
+  delete require.cache[SHARED_UTILS_PATH];
+
+  // Fake DynamoDB client
+  const dynamoPath = require.resolve("@aws-sdk/client-dynamodb");
+  require.cache[dynamoPath] = fakeCacheEntry(dynamoPath, {
+    DynamoDBClient: class {
+      send(cmd) { return mockSend(cmd); }
+    }
+  });
+
+  // Fake DynamoDB Document Client + commands
+  const libDynamoPath = require.resolve("@aws-sdk/lib-dynamodb");
+  require.cache[libDynamoPath] = fakeCacheEntry(libDynamoPath, {
+    DynamoDBDocumentClient: {
+      from: () => ({ send: (cmd) => mockSend(cmd) })
+    },
+    UpdateCommand: class UpdateCommand {
+      constructor(params) { this.params = params; this.name = "UpdateCommand"; }
+    },
+    GetCommand: class GetCommand {
+      constructor(params) { this.params = params; this.name = "GetCommand"; }
+    }
+  });
+
+  // Fake S3 client + commands
+  const s3Path = require.resolve("@aws-sdk/client-s3");
+  require.cache[s3Path] = fakeCacheEntry(s3Path, {
+    S3Client: class {
+      send(cmd) { return mockSend(cmd); }
+    },
+    PutObjectCommand: class PutObjectCommand {
+      constructor(params) { this.params = params; this.name = "PutObjectCommand"; }
+    },
+    GetObjectCommand: class GetObjectCommand {
+      constructor(params) { this.params = params; this.name = "GetObjectCommand"; }
+    }
+  });
+
+  // Fake SQS client + command
+  const sqsPath = require.resolve("@aws-sdk/client-sqs");
+  require.cache[sqsPath] = fakeCacheEntry(sqsPath, {
+    SQSClient: class {
+      send(cmd) { return mockSend(cmd); }
+    },
+    SendMessageCommand: class SendMessageCommand {
+      constructor(params) { this.params = params; this.name = "SendMessageCommand"; }
+    }
+  });
+
+  // Fake Secrets Manager client + command
+  const secretsPath = require.resolve("@aws-sdk/client-secrets-manager");
+  require.cache[secretsPath] = fakeCacheEntry(secretsPath, {
+    SecretsManagerClient: class {
+      send(cmd) { return mockSend(cmd); }
+    },
+    GetSecretValueCommand: class GetSecretValueCommand {
+      constructor(params) { this.params = params; this.name = "GetSecretValueCommand"; }
+    }
+  });
+
+  // Fake https module — shared-utils uses https.request for GitHub API calls.
+  // The mockHttpsRequest function receives (options, callback) and must return a
+  // fake request object with write() and end() methods.
+  const httpsPath = require.resolve("https");
+  const realHttps = require("https");
+  require.cache[httpsPath] = fakeCacheEntry(httpsPath, {
+    ...realHttps,
+    request: mockHttpsRequest
+  });
+
+  // Fake crypto — shared-utils uses crypto.sign for JWT creation with an RSA
+  // private key. In tests we use a fake key, so we stub crypto.sign to return
+  // a deterministic fake signature instead of actually doing RSA signing.
+  const cryptoPath = require.resolve("crypto");
+  const realCrypto = require("crypto");
+  require.cache[cryptoPath] = fakeCacheEntry(cryptoPath, {
+    ...realCrypto,
+    sign: () => Buffer.from("fake-jwt-signature")
+  });
+
+  // Set required environment variables
+  process.env.TABLE_NAME = "test-tasks-table";
+  process.env.BUCKET_NAME = "test-research-bucket";
+  process.env.STAGE = "test";
+
+  // Load handler with faked dependencies
+  const handler = require(PUBLISH_WORKER_PATH).handler;
+
+  const cleanup = () => {
+    delete require.cache[PUBLISH_WORKER_PATH];
+    delete require.cache[SHARED_UTILS_PATH];
+    delete require.cache[dynamoPath];
+    delete require.cache[libDynamoPath];
+    delete require.cache[s3Path];
+    delete require.cache[sqsPath];
+    delete require.cache[secretsPath];
+    delete require.cache[httpsPath];
+    delete require.cache[cryptoPath];
+    delete process.env.TABLE_NAME;
+    delete process.env.BUCKET_NAME;
+    delete process.env.STAGE;
+  };
+
+  return { handler, cleanup };
+}
+
+module.exports = { setupResearchMocks, setupWorkerMocks, setupPublishWorkerMocks, WORKER_PATH, WRITE_WORKER_PATH, EDIT_WORKER_PATH, SEO_WORKER_PATH, PUBLISH_WORKER_PATH };
