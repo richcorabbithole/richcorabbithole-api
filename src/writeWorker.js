@@ -89,10 +89,11 @@ module.exports.handler = async (event) => {
 
     const task = existing.Item;
 
-    // Idempotency: if already drafted and not a revision request, skip
-    if (task.status === "drafted") {
-      console.log(`Task ${taskId} already drafted, skipping`);
-      return { taskId, status: "already_drafted" };
+    // Idempotency: if already drafted or further along, skip
+    const completedStatuses = ["drafted", "editing", "edited", "optimizing", "ready"];
+    if (completedStatuses.includes(task.status)) {
+      console.log(`Task ${taskId} already processed (status: ${task.status}), skipping`);
+      return { taskId, status: "already_processed" };
     }
 
     // Only process tasks in expected statuses

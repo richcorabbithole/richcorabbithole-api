@@ -142,7 +142,37 @@ describe("editWorker handler", () => {
       });
 
       const result = await handler(sqsEvent({ taskId: "t1" }));
-      assert.strictEqual(result.status, "already_edited");
+      assert.strictEqual(result.status, "already_processed");
+      assert.strictEqual(mockCreate.mock.calls.length, 0);
+    });
+
+    it("skips tasks that have progressed to optimizing", async () => {
+      mockSend.mock.mockImplementation(async (cmd) => {
+        if (cmd.name === "GetCommand") {
+          return {
+            Item: { taskId: "t1", status: "optimizing", draftS3Key: "drafts/t1.md" }
+          };
+        }
+        return {};
+      });
+
+      const result = await handler(sqsEvent({ taskId: "t1" }));
+      assert.strictEqual(result.status, "already_processed");
+      assert.strictEqual(mockCreate.mock.calls.length, 0);
+    });
+
+    it("skips tasks that have progressed to ready", async () => {
+      mockSend.mock.mockImplementation(async (cmd) => {
+        if (cmd.name === "GetCommand") {
+          return {
+            Item: { taskId: "t1", status: "ready", draftS3Key: "drafts/t1.md" }
+          };
+        }
+        return {};
+      });
+
+      const result = await handler(sqsEvent({ taskId: "t1" }));
+      assert.strictEqual(result.status, "already_processed");
       assert.strictEqual(mockCreate.mock.calls.length, 0);
     });
   });
