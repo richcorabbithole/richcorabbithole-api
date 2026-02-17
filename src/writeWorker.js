@@ -19,7 +19,7 @@
 
 const { GetCommand } = require("@aws-sdk/lib-dynamodb");
 const { PutObjectCommand, CopyObjectCommand } = require("@aws-sdk/client-s3");
-const { getDocClient, getS3Client, getS3Object, getAnthropicApiKey, updateTaskStatus, parseSqsMessage } = require("./lib/shared-utils");
+const { getDocClient, getS3Client, getS3Object, getAnthropicApiKey, updateTaskStatus, parseSqsMessage, sendSqsMessage } = require("./lib/shared-utils");
 
 const FIRST_DRAFT_SYSTEM_PROMPT = `You are a blog writer for richcorabbithole — a blog about going deep on random topics (hyperfixations).
 
@@ -190,7 +190,19 @@ module.exports.handler = async (event) => {
       revisionCount
     });
 
-    console.log(`Draft ${isRevision ? "revised" : "created"} for task ${taskId}: ${draftS3Key}`);
+    // Enqueue edit job — non-fatal since draft is already persisted.
+    // If this fails, the task stays "drafted" and can be re-triggered via cli.js draft.
+    try {
+      if (!process.env.EDIT_QUEUE_URL) {
+        console.error(`EDIT_QUEUE_URL not set — skipping edit enqueue for task ${taskId}`);
+      } else {
+        await sendSqsMessage(process.env.EDIT_QUEUE_URL, { taskId });
+        console.log(`Draft ${isRevision ? "revised" : "created"} for task ${taskId}: ${draftS3Key} — edit job enqueued`);
+      }
+    } catch (enqueueErr) {
+      console.error(`Draft saved but failed to enqueue edit job for ${taskId}:`, enqueueErr);
+    }
+
     return { taskId, draftS3Key, status: "drafted", revisionCount };
   } catch (error) {
     console.error(`Writing failed for task ${taskId}:`, error);

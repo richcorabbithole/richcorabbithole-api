@@ -1,6 +1,6 @@
 const { describe, it, mock, beforeEach, afterEach } = require("node:test");
 const assert = require("node:assert");
-const { setupWorkerMocks, WRITE_WORKER_PATH } = require("./test-helpers/mock-aws.js");
+const { setupWorkerMocks, EDIT_WORKER_PATH } = require("./test-helpers/mock-aws.js");
 const {
   sqsEvent,
   runSqsValidationTests,
@@ -8,7 +8,7 @@ const {
   runErrorHandlingTests
 } = require("./test-helpers/worker-test-utils.js");
 
-const SAMPLE_DRAFT = `---
+const SAMPLE_EDITED = `---
 title: "Test Post"
 description: "A test post about testing"
 publishDate: "2026-02-16"
@@ -22,9 +22,9 @@ sources:
 
 # Test Post
 
-This is a test blog post.`;
+This is an improved test blog post with better flow and clarity.`;
 
-describe("writeWorker handler", () => {
+describe("editWorker handler", () => {
   let handler;
   let mockSend;
   let mockCreate;
@@ -35,8 +35,9 @@ describe("writeWorker handler", () => {
       return {
         Item: {
           taskId: "t1",
-          status: "researched",
-          s3Key: "research/t1.md"
+          status: "drafted",
+          s3Key: "research/t1.md",
+          draftS3Key: "drafts/t1.md"
         }
       };
     }
@@ -45,7 +46,7 @@ describe("writeWorker handler", () => {
     }
     if (cmd.name === "GetObjectCommand") {
       return {
-        Body: { transformToString: async () => "# Research\n\nSome research content" }
+        Body: { transformToString: async () => "# Draft\n\nSome draft content" }
       };
     }
     return {};
@@ -55,16 +56,11 @@ describe("writeWorker handler", () => {
     mockSend = mock.fn(async (cmd) => defaultMockSend(cmd));
 
     mockCreate = mock.fn(async () => ({
-      content: [{ type: "text", text: SAMPLE_DRAFT }]
+      content: [{ type: "text", text: SAMPLE_EDITED }]
     }));
 
     const setup = setupWorkerMocks(mockSend, mockCreate, {
-      handlerPath: WRITE_WORKER_PATH,
-      extraS3Commands: {
-        CopyObjectCommand: class CopyObjectCommand {
-          constructor(params) { this.params = params; this.name = "CopyObjectCommand"; }
-        }
-      }
+      handlerPath: EDIT_WORKER_PATH
     });
     handler = setup.handler;
     cleanup = setup.cleanup;
@@ -94,17 +90,17 @@ describe("writeWorker handler", () => {
       );
     });
 
-    it("throws when task has no research s3Key", async () => {
+    it("throws when task has no draftS3Key", async () => {
       mockSend.mock.mockImplementation(async (cmd) => {
         if (cmd.name === "GetCommand") {
-          return { Item: { taskId: "t1", status: "researched" } };
+          return { Item: { taskId: "t1", status: "drafted" } };
         }
         return {};
       });
 
       await assert.rejects(
         () => handler(sqsEvent({ taskId: "t1" })),
-        { message: "Task t1 has no research s3Key" }
+        { message: "Task t1 has no draft draftS3Key" }
       );
     });
 
@@ -112,7 +108,7 @@ describe("writeWorker handler", () => {
       mockSend.mock.mockImplementation(async (cmd) => {
         if (cmd.name === "GetCommand") {
           return {
-            Item: { taskId: "t1", status: "pending", s3Key: "research/t1.md" }
+            Item: { taskId: "t1", status: "pending", draftS3Key: "drafts/t1.md" }
           };
         }
         return {};
@@ -135,34 +131,34 @@ describe("writeWorker handler", () => {
   // --- Idempotency ---
 
   describe("idempotency", () => {
-    it("skips already-drafted tasks", async () => {
+    it("skips already-edited tasks", async () => {
       mockSend.mock.mockImplementation(async (cmd) => {
         if (cmd.name === "GetCommand") {
           return {
-            Item: { taskId: "t1", status: "drafted", s3Key: "research/t1.md" }
+            Item: { taskId: "t1", status: "edited", draftS3Key: "drafts/t1.md" }
           };
         }
         return {};
       });
 
       const result = await handler(sqsEvent({ taskId: "t1" }));
-      assert.strictEqual(result.status, "already_drafted");
+      assert.strictEqual(result.status, "already_edited");
       assert.strictEqual(mockCreate.mock.calls.length, 0);
     });
   });
 
-  // --- First draft happy path ---
+  // --- Happy path ---
 
-  describe("first draft happy path", () => {
+  describe("happy path", () => {
     it("executes full pipeline in correct order", async () => {
       await handler(sqsEvent({ taskId: "t1" }));
 
       const callNames = mockSend.mock.calls.map(c => c.arguments[0].name);
 
-      // Expected order: GetCommand (lookup), UpdateCommand (writing),
-      // GetObjectCommand (fetch research), GetSecretValueCommand,
-      // PutObjectCommand (save draft), UpdateCommand (drafted),
-      // SendMessageCommand (enqueue edit)
+      // Expected order: GetCommand (lookup), UpdateCommand (editing),
+      // GetObjectCommand (fetch draft), GetSecretValueCommand,
+      // PutObjectCommand (save edited), UpdateCommand (edited),
+      // SendMessageCommand (enqueue SEO)
       assert.strictEqual(callNames[0], "GetCommand");
       assert.strictEqual(callNames[1], "UpdateCommand");
       assert.strictEqual(callNames[2], "GetObjectCommand");
@@ -172,64 +168,63 @@ describe("writeWorker handler", () => {
       assert.strictEqual(callNames[6], "SendMessageCommand");
     });
 
-    it("reads research from correct S3 key", async () => {
+    it("reads draft from correct S3 key", async () => {
       await handler(sqsEvent({ taskId: "t1" }));
 
       const getCall = mockSend.mock.calls.find(
         c => c.arguments[0].name === "GetObjectCommand"
       );
-      assert.strictEqual(getCall.arguments[0].params.Key, "research/t1.md");
+      assert.strictEqual(getCall.arguments[0].params.Key, "drafts/t1.md");
       assert.strictEqual(getCall.arguments[0].params.Bucket, "test-research-bucket");
     });
 
-    it("writes draft to correct S3 key", async () => {
+    it("writes edited content to correct S3 key", async () => {
       await handler(sqsEvent({ taskId: "t1" }));
 
       const putCall = mockSend.mock.calls.find(
         c => c.arguments[0].name === "PutObjectCommand"
       );
-      assert.strictEqual(putCall.arguments[0].params.Key, "drafts/t1.md");
+      assert.strictEqual(putCall.arguments[0].params.Key, "edited/t1.md");
       assert.strictEqual(putCall.arguments[0].params.Bucket, "test-research-bucket");
       assert.strictEqual(putCall.arguments[0].params.ContentType, "text/markdown");
-      assert.strictEqual(putCall.arguments[0].params.Body, SAMPLE_DRAFT);
+      assert.strictEqual(putCall.arguments[0].params.Body, SAMPLE_EDITED);
     });
 
-    it("returns taskId, draftS3Key, drafted status, and revisionCount 0", async () => {
+    it("returns taskId, editedS3Key, and edited status", async () => {
       const result = await handler(sqsEvent({ taskId: "t1" }));
 
       assert.strictEqual(result.taskId, "t1");
-      assert.strictEqual(result.draftS3Key, "drafts/t1.md");
-      assert.strictEqual(result.status, "drafted");
-      assert.strictEqual(result.revisionCount, 0);
+      assert.strictEqual(result.editedS3Key, "edited/t1.md");
+      assert.strictEqual(result.status, "edited");
     });
 
-    it("sends research content to Claude in user message", async () => {
+    it("sends draft content to Claude in user message", async () => {
       await handler(sqsEvent({ taskId: "t1" }));
 
       assert.strictEqual(mockCreate.mock.calls.length, 1);
       const callArgs = mockCreate.mock.calls[0].arguments[0];
-      assert.ok(callArgs.messages[0].content.includes("Some research content"));
+      assert.ok(callArgs.messages[0].content.includes("Some draft content"));
     });
 
-    it("updates DynamoDB with drafted status and draftS3Key", async () => {
+    it("updates DynamoDB with edited status and editedS3Key", async () => {
       await handler(sqsEvent({ taskId: "t1" }));
 
       const updateCalls = mockSend.mock.calls.filter(
         c => c.arguments[0].name === "UpdateCommand"
       );
-      // Last UpdateCommand should be the "drafted" status
-      const draftedUpdate = updateCalls[updateCalls.length - 1];
+      // Last UpdateCommand should be the "edited" status
+      const editedUpdate = updateCalls[updateCalls.length - 1];
       assert.strictEqual(
-        draftedUpdate.arguments[0].params.ExpressionAttributeValues[":status"],
-        "drafted"
+        editedUpdate.arguments[0].params.ExpressionAttributeValues[":status"],
+        "edited"
       );
       assert.strictEqual(
-        draftedUpdate.arguments[0].params.ExpressionAttributeValues[":draftS3Key"],
-        "drafts/t1.md"
+        editedUpdate.arguments[0].params.ExpressionAttributeValues[":editedS3Key"],
+        "edited/t1.md"
       );
     });
 
-    it("enqueues edit job to EditQueue after drafting", async () => {
+    it("enqueues SEO job to SeoQueue after editing", async () => {
       await handler(sqsEvent({ taskId: "t1" }));
 
       const sendCall = mockSend.mock.calls.find(
@@ -238,13 +233,14 @@ describe("writeWorker handler", () => {
       assert.ok(sendCall, "Expected a SendMessageCommand call");
       assert.strictEqual(
         sendCall.arguments[0].params.QueueUrl,
-        "https://sqs.us-east-1.amazonaws.com/123456789/test-edit-queue"
+        "https://sqs.us-east-1.amazonaws.com/123456789/test-seo-queue"
       );
       const msgBody = JSON.parse(sendCall.arguments[0].params.MessageBody);
       assert.strictEqual(msgBody.taskId, "t1");
     });
 
-    it("returns successfully when edit queue enqueue fails", async () => {
+    it("returns successfully when SEO queue enqueue fails", async () => {
+      let callCount = 0;
       mockSend.mock.mockImplementation(async (cmd) => {
         if (cmd.name === "SendMessageCommand") {
           throw new Error("SQS send failed");
@@ -253,98 +249,7 @@ describe("writeWorker handler", () => {
       });
 
       const result = await handler(sqsEvent({ taskId: "t1" }));
-      assert.strictEqual(result.status, "drafted");
-    });
-  });
-
-  // --- Revision flow ---
-
-  describe("revision flow", () => {
-    beforeEach(() => {
-      mockSend.mock.mockImplementation(async (cmd) => {
-        if (cmd.name === "GetCommand") {
-          return {
-            Item: {
-              taskId: "t1",
-              status: "revision_requested",
-              s3Key: "research/t1.md",
-              draftS3Key: "drafts/t1.md",
-              revisionNotes: "Make it more opinionated",
-              revisionCount: 1
-            }
-          };
-        }
-        if (cmd.name === "GetSecretValueCommand") {
-          return { SecretString: "sk-ant-test-key" };
-        }
-        if (cmd.name === "GetObjectCommand") {
-          return {
-            Body: { transformToString: async () => "# Existing content" }
-          };
-        }
-        return {};
-      });
-    });
-
-    it("archives previous draft before overwriting", async () => {
-      await handler(sqsEvent({ taskId: "t1" }));
-
-      const copyCall = mockSend.mock.calls.find(
-        c => c.arguments[0].name === "CopyObjectCommand"
-      );
-      assert.ok(copyCall, "Expected a CopyObjectCommand call");
-      assert.strictEqual(copyCall.arguments[0].params.Key, "drafts/t1.rev1.md");
-      assert.strictEqual(
-        copyCall.arguments[0].params.CopySource,
-        "test-research-bucket/drafts/t1.md"
-      );
-    });
-
-    it("sends research, current draft, and revision notes to Claude", async () => {
-      await handler(sqsEvent({ taskId: "t1" }));
-
-      const callArgs = mockCreate.mock.calls[0].arguments[0];
-      const userContent = callArgs.messages[0].content;
-      assert.ok(userContent.includes("Original Research"));
-      assert.ok(userContent.includes("Current Draft"));
-      assert.ok(userContent.includes("Revision Notes"));
-      assert.ok(userContent.includes("Make it more opinionated"));
-    });
-
-    it("increments revisionCount", async () => {
-      const result = await handler(sqsEvent({ taskId: "t1" }));
-
-      assert.strictEqual(result.revisionCount, 2);
-    });
-
-    it("uses default revision notes when none provided", async () => {
-      mockSend.mock.mockImplementation(async (cmd) => {
-        if (cmd.name === "GetCommand") {
-          return {
-            Item: {
-              taskId: "t1",
-              status: "revision_requested",
-              s3Key: "research/t1.md",
-              draftS3Key: "drafts/t1.md",
-              revisionCount: 0
-            }
-          };
-        }
-        if (cmd.name === "GetSecretValueCommand") {
-          return { SecretString: "sk-ant-test-key" };
-        }
-        if (cmd.name === "GetObjectCommand") {
-          return {
-            Body: { transformToString: async () => "# Content" }
-          };
-        }
-        return {};
-      });
-
-      await handler(sqsEvent({ taskId: "t1" }));
-
-      const callArgs = mockCreate.mock.calls[0].arguments[0];
-      assert.ok(callArgs.messages[0].content.includes("No specific notes provided"));
+      assert.strictEqual(result.status, "edited");
     });
   });
 
@@ -353,10 +258,10 @@ describe("writeWorker handler", () => {
   runClaudeResponseTests(
     () => handler,
     () => sqsEvent({ taskId: "t1" }),
-    "drafted",
+    "edited",
     () => mockCreate,
     () => mockSend,
-    SAMPLE_DRAFT
+    SAMPLE_EDITED
   );
 
   // --- Shared + domain-specific error handling ---
@@ -374,7 +279,7 @@ describe("writeWorker handler", () => {
       mockSend.mock.mockImplementation(async (cmd) => {
         if (cmd.name === "GetCommand") {
           return {
-            Item: { taskId: "t1", status: "researched", s3Key: "research/t1.md" }
+            Item: { taskId: "t1", status: "drafted", draftS3Key: "drafts/t1.md" }
           };
         }
         if (cmd.name === "GetObjectCommand") {
@@ -393,7 +298,7 @@ describe("writeWorker handler", () => {
       mockSend.mock.mockImplementation(async (cmd) => {
         if (cmd.name === "GetCommand") {
           return {
-            Item: { taskId: "t1", status: "researched", s3Key: "research/t1.md" }
+            Item: { taskId: "t1", status: "drafted", draftS3Key: "drafts/t1.md" }
           };
         }
         if (cmd.name === "GetSecretValueCommand") {
@@ -401,7 +306,7 @@ describe("writeWorker handler", () => {
         }
         if (cmd.name === "GetObjectCommand") {
           return {
-            Body: { transformToString: async () => "# Research content" }
+            Body: { transformToString: async () => "# Draft content" }
           };
         }
         if (cmd.name === "PutObjectCommand") {
