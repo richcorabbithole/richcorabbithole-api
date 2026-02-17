@@ -19,15 +19,15 @@
 
 const { GetCommand } = require("@aws-sdk/lib-dynamodb");
 const { PutObjectCommand, CopyObjectCommand } = require("@aws-sdk/client-s3");
-const { getDocClient, getS3Client, getS3Object, getAnthropicApiKey, updateTaskStatus, parseSqsMessage } = require("./lib/shared-utils");
+const { getDocClient, getS3Client, getS3Object, getAnthropicApiKey, updateTaskStatus, parseSqsMessage, sendSqsMessage } = require("./lib/shared-utils");
 
 const FIRST_DRAFT_SYSTEM_PROMPT = `You are a blog writer for richcorabbithole — a blog about going deep on random topics (hyperfixations).
 
-Your job is to transform research notes into an engaging, well-structured blog post.
+Your job is to transform research notes into a blog post that satisfies intellectual curiosity. This is not marketing content or persuasive writing — it's exploration and discovery shared with curious readers.
 
 The post MUST start with valid YAML frontmatter fenced by --- lines. The frontmatter MUST contain exactly these fields:
-- title: A compelling post title (string, in quotes)
-- description: A 1-2 sentence hook (string, in quotes)
+- title: An accurate, descriptive title that reflects what you actually learned (string, in quotes)
+- description: A 1-2 sentence summary of what the post explores (string, in quotes)
 - publishDate: Today's date in YYYY-MM-DD format (string, in quotes)
 - hyperfixation: One of: tech, science, history, gaming, maker, other (string, in quotes)
 - researchDepth: How deep the research goes, 1-5 integer
@@ -36,11 +36,20 @@ The post MUST start with valid YAML frontmatter fenced by --- lines. The frontma
 - sources: Array of source URLs from the research (array of strings)
 
 After the frontmatter, write the blog post in markdown with:
-- A conversational, curious tone — like explaining something fascinating to a friend
-- Clear section headings (## level)
-- A mix of explanation, examples, and personal-style commentary
-- A natural conclusion that reflects on the rabbit hole journey
+- **Conversational but substantive**: Like telling a friend about something interesting you learned over coffee. Natural, engaged, but not breathless or clinical.
+- **Grounded in research**: Everything you write should come from the research notes. Do NOT invent scenarios, anecdotes, or personal experiences. If you want to frame something, use the actual research as the hook.
+- **Personal voice for reactions, not stories**: Use "I" for genuine reactions to the research ("This surprised me", "I wasn't expecting this"), but never invent fictional situations ("my friend told me", "I once knew someone").
+- **Show your thinking**: Include the process of discovery, not just polished conclusions. Dead ends, uncertainties, and questions are valuable.
+- **Specific over generic**: Actual examples, real numbers, concrete details from the research. Avoid vague gestures like "research shows" without saying which research.
+- **Natural section headings** (## level) that describe what they contain, not marketing formulas
+- **Balanced tone**: Curious and interested, but not overselling. If something is genuinely surprising, say so. If it's incremental, say that too.
+- **Opening**: Start with the topic itself, not "rabbit hole" metaphors or origin stories. Get to the interesting part immediately.
+- A natural conclusion that reflects on what you learned or what questions remain
 - 800-1500 words of body content
+
+CRITICAL: Only write about what's actually in the research. No fictional anecdotes, invented friends, or made-up scenarios. The blog name is "richcorabbithole" but you don't need to say "rabbit hole" in every post.
+
+Think: engaged curiosity, not academic distance or marketing hype. Trust your reader to find the material interesting without overselling it.
 
 Do NOT include any text before the opening --- or after the post content.
 Output ONLY the complete markdown file with frontmatter.`;
@@ -52,17 +61,19 @@ You are revising an existing draft based on editorial feedback. You will receive
 2. The current draft
 3. Revision notes explaining what needs to change
 
-Apply the feedback while maintaining the blog's conversational, curious tone. Keep the same frontmatter schema but update fields if the feedback requires it (e.g., better title, updated tags).
+Apply the feedback while maintaining the blog's conversational but substantive tone. Aim for engaged curiosity, not academic distance or marketing hype. Keep the same frontmatter schema but update fields if the feedback requires it (e.g., more accurate title, better tags).
 
 The post MUST start with valid YAML frontmatter fenced by --- lines. The frontmatter MUST contain exactly these fields:
-- title: A compelling post title (string, in quotes)
-- description: A 1-2 sentence hook (string, in quotes)
+- title: An accurate, descriptive title (string, in quotes)
+- description: A 1-2 sentence summary of what the post explores (string, in quotes)
 - publishDate: The original publish date (string, in quotes, YYYY-MM-DD format)
 - hyperfixation: One of: tech, science, history, gaming, maker, other (string, in quotes)
 - researchDepth: How deep the research goes, 1-5 integer
 - tags: Array of 3-6 relevant tags (array of strings)
 - draft: true (boolean)
 - sources: Array of source URLs from the research (array of strings)
+
+Keep personal framing ("I"), show your thinking process, use specific details. Trust your reader's intelligence.
 
 Do NOT include any text before the opening --- or after the post content.
 Output ONLY the complete revised markdown file with frontmatter.`;
@@ -89,17 +100,19 @@ module.exports.handler = async (event) => {
 
     const task = existing.Item;
 
-    // Idempotency: if already drafted and not a revision request, skip
-    if (task.status === "drafted") {
-      console.log(`Task ${taskId} already drafted, skipping`);
-      return { taskId, status: "already_drafted" };
+    // Idempotency: if already completed (drafted or beyond), skip
+    const completedStatuses = ["drafted", "editing", "edited", "optimizing", "ready"];
+    if (completedStatuses.includes(task.status)) {
+      console.log(`Task ${taskId} already processed (status: ${task.status}), skipping`);
+      return { taskId, status: "already_processed" };
     }
 
-    // Only process tasks in expected statuses
+    // Allow retries for in-progress writing
     const isRevision = task.status === "revision_requested";
     const isFirstDraft = task.status === "researched";
+    const isRetry = task.status === "writing";
 
-    if (!isFirstDraft && !isRevision) {
+    if (!isFirstDraft && !isRevision && !isRetry) {
       console.error(`Task ${taskId} has unexpected status: ${task.status}`);
       await updateTaskStatus(taskId, "failed", {
         error: `Cannot write from status: ${task.status}`
@@ -112,8 +125,10 @@ module.exports.handler = async (event) => {
       throw new Error(`Task ${taskId} has no research s3Key`);
     }
 
-    // Update status to writing
-    await updateTaskStatus(taskId, "writing");
+    // Update status to writing (idempotent if already writing)
+    if (task.status !== "writing") {
+      await updateTaskStatus(taskId, "writing");
+    }
 
     // Fetch the research from S3
     const researchContent = await getS3Object(task.s3Key);
@@ -190,7 +205,19 @@ module.exports.handler = async (event) => {
       revisionCount
     });
 
-    console.log(`Draft ${isRevision ? "revised" : "created"} for task ${taskId}: ${draftS3Key}`);
+    // Enqueue edit job — non-fatal since draft is already persisted.
+    // If this fails, the task stays "drafted" and can be re-triggered via cli.js draft.
+    try {
+      if (!process.env.EDIT_QUEUE_URL) {
+        console.error(`EDIT_QUEUE_URL not set — skipping edit enqueue for task ${taskId}`);
+      } else {
+        await sendSqsMessage(process.env.EDIT_QUEUE_URL, { taskId });
+        console.log(`Draft ${isRevision ? "revised" : "created"} for task ${taskId}: ${draftS3Key} — edit job enqueued`);
+      }
+    } catch (enqueueErr) {
+      console.error(`Draft saved but failed to enqueue edit job for ${taskId}:`, enqueueErr);
+    }
+
     return { taskId, draftS3Key, status: "drafted", revisionCount };
   } catch (error) {
     console.error(`Writing failed for task ${taskId}:`, error);

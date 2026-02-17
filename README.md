@@ -40,7 +40,29 @@ Client (CLI) ─── POST /research ───> API Gateway (IAM auth)
                                     │ Update DynamoDB      │
                                     └────────┬───────────┘
                                              │
-                                    On failure (2x) ──> DLQ
+                                        EditQueue (SQS)
+                                    (VisibilityTimeout: 240s)
+                                             │
+                                    editWorker.js
+                                    ┌────────────────────┐
+                                    │ Read draft from S3   │
+                                    │ Call Claude API      │
+                                    │ Save edited to S3    │
+                                    │ Update DynamoDB      │
+                                    └────────┬───────────┘
+                                             │
+                                        SeoQueue (SQS)
+                                    (VisibilityTimeout: 120s)
+                                             │
+                                    seoWorker.js
+                                    ┌────────────────────┐
+                                    │ Read edited from S3  │
+                                    │ Call Claude API      │
+                                    │ Save final to S3     │
+                                    │ Update DynamoDB      │
+                                    └────────────────────┘
+                                             │
+                                    On failure (2x) ──> DLQ (per queue)
 ```
 
 ### Services
@@ -60,6 +82,8 @@ src/
   research.js           # Thin accept handler (validate, queue, 202)
   researchWorker.js     # SQS research worker (Claude API, S3, DynamoDB)
   writeWorker.js        # SQS writing worker (drafts & revisions)
+  editWorker.js         # SQS editing worker (copy editing & polishing)
+  seoWorker.js          # SQS SEO worker (metadata optimization)
   lib/
     shared-utils.js     # Shared AWS utilities (clients, helpers, SQS send)
 tests/
@@ -67,6 +91,8 @@ tests/
   research.test.js      # Tests for accept handler
   researchWorker.test.js # Tests for research worker
   writeWorker.test.js   # Tests for write worker
+  editWorker.test.js    # Tests for edit worker
+  seoWorker.test.js     # Tests for SEO worker
   test-helpers/
     mock-aws.js         # AWS SDK mock infrastructure
     worker-test-utils.js # Shared worker test behaviors
@@ -165,7 +191,7 @@ npm run read-draft -- <taskId> --profile richcorabbithole
 💡 Track your task: GET /research/a1b2c3d4-...
 ```
 
-The pipeline picks up the task from SQS and progresses it through stages. Task status progresses: `pending` → `researching` → `researched` → `writing` → `drafted` (or `failed` at any step).
+The pipeline picks up the task from SQS and progresses it through stages. Task status progresses: `pending` → `researching` → `researched` → `writing` → `drafted` → `editing` → `edited` → `optimizing` → `ready` (or `failed` at any step).
 
 ## Stages
 

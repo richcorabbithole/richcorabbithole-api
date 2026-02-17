@@ -46,6 +46,8 @@ provider:
           Resource:
             - !GetAtt ResearchQueue.Arn
             - !GetAtt WriteQueue.Arn
+            - !GetAtt EditQueue.Arn
+            - !GetAtt SeoQueue.Arn
   tags:
     Project: richcorabbithole
     Environment: ${self:provider.stage}
@@ -109,9 +111,41 @@ functions:
       TABLE_NAME: ${self:custom.tableName}
       SECRET_ID: richcorabbithole/anthropic-api-key
       STAGE: ${self:custom.stage}
+      EDIT_QUEUE_URL: !Ref EditQueue
     events:
       - sqs:
           arn: !GetAtt WriteQueue.Arn
+          batchSize: 1
+
+  # Worker function: triggered by SQS, edits/polishes a draft (up to 3 min)
+  editWorker:
+    handler: src/editWorker.handler
+    timeout: 180
+    memorySize: 512
+    environment:
+      BUCKET_NAME: ${self:custom.bucketName}
+      TABLE_NAME: ${self:custom.tableName}
+      SECRET_ID: richcorabbithole/anthropic-api-key
+      STAGE: ${self:custom.stage}
+      SEO_QUEUE_URL: !Ref SeoQueue
+    events:
+      - sqs:
+          arn: !GetAtt EditQueue.Arn
+          batchSize: 1
+
+  # Worker function: triggered by SQS, generates SEO metadata (up to 1 min)
+  seoWorker:
+    handler: src/seoWorker.handler
+    timeout: 60
+    memorySize: 512
+    environment:
+      BUCKET_NAME: ${self:custom.bucketName}
+      TABLE_NAME: ${self:custom.tableName}
+      SECRET_ID: richcorabbithole/anthropic-api-key
+      STAGE: ${self:custom.stage}
+    events:
+      - sqs:
+          arn: !GetAtt SeoQueue.Arn
           batchSize: 1
 
 resources:
@@ -229,6 +263,82 @@ resources:
         SqsManagedSseEnabled: true
         RedrivePolicy:
           deadLetterTargetArn: !GetAtt WriterDLQ.Arn
+          maxReceiveCount: 2
+        Tags:
+          - Key: Project
+            Value: richcorabbithole
+          - Key: Environment
+            Value: ${self:custom.stage}
+          - Key: ManagedBy
+            Value: serverless
+
+    # Dead letter queue for editWorker — receives messages that failed processing after maxReceiveCount attempts
+    EditDLQ:
+      Type: AWS::SQS::Queue
+      DeletionPolicy: Retain
+      UpdateReplacePolicy: Retain
+      Properties:
+        QueueName: richcorabbithole-edit-dlq-${self:custom.stage}
+        MessageRetentionPeriod: 1209600
+        SqsManagedSseEnabled: true
+        Tags:
+          - Key: Project
+            Value: richcorabbithole
+          - Key: Environment
+            Value: ${self:custom.stage}
+          - Key: ManagedBy
+            Value: serverless
+
+    # Main edit queue — the writeWorker sends messages here, the editWorker consumes them
+    EditQueue:
+      Type: AWS::SQS::Queue
+      DeletionPolicy: Retain
+      UpdateReplacePolicy: Retain
+      Properties:
+        QueueName: richcorabbithole-edit-queue-${self:custom.stage}
+        VisibilityTimeout: 240
+        MessageRetentionPeriod: 86400
+        SqsManagedSseEnabled: true
+        RedrivePolicy:
+          deadLetterTargetArn: !GetAtt EditDLQ.Arn
+          maxReceiveCount: 2
+        Tags:
+          - Key: Project
+            Value: richcorabbithole
+          - Key: Environment
+            Value: ${self:custom.stage}
+          - Key: ManagedBy
+            Value: serverless
+
+    # Dead letter queue for seoWorker — receives messages that failed processing after maxReceiveCount attempts
+    SeoDLQ:
+      Type: AWS::SQS::Queue
+      DeletionPolicy: Retain
+      UpdateReplacePolicy: Retain
+      Properties:
+        QueueName: richcorabbithole-seo-dlq-${self:custom.stage}
+        MessageRetentionPeriod: 1209600
+        SqsManagedSseEnabled: true
+        Tags:
+          - Key: Project
+            Value: richcorabbithole
+          - Key: Environment
+            Value: ${self:custom.stage}
+          - Key: ManagedBy
+            Value: serverless
+
+    # Main SEO queue — the editWorker sends messages here, the seoWorker consumes them
+    SeoQueue:
+      Type: AWS::SQS::Queue
+      DeletionPolicy: Retain
+      UpdateReplacePolicy: Retain
+      Properties:
+        QueueName: richcorabbithole-seo-queue-${self:custom.stage}
+        VisibilityTimeout: 120
+        MessageRetentionPeriod: 86400
+        SqsManagedSseEnabled: true
+        RedrivePolicy:
+          deadLetterTargetArn: !GetAtt SeoDLQ.Arn
           maxReceiveCount: 2
         Tags:
           - Key: Project
