@@ -19,7 +19,7 @@
 
 const { GetCommand } = require("@aws-sdk/lib-dynamodb");
 const { PutObjectCommand, CopyObjectCommand } = require("@aws-sdk/client-s3");
-const { getDocClient, getS3Client, getS3Object, getAnthropicApiKey, updateTaskStatus, parseSqsMessage } = require("./lib/shared-utils");
+const { getDocClient, getS3Client, getS3Object, getAnthropicApiKey, updateTaskStatus, parseSqsMessage, sendSqsMessage } = require("./lib/shared-utils");
 
 const FIRST_DRAFT_SYSTEM_PROMPT = `You are a blog writer for richcorabbithole — a blog about going deep on random topics (hyperfixations).
 
@@ -89,17 +89,19 @@ module.exports.handler = async (event) => {
 
     const task = existing.Item;
 
-    // Idempotency: if already drafted and not a revision request, skip
-    if (task.status === "drafted") {
-      console.log(`Task ${taskId} already drafted, skipping`);
-      return { taskId, status: "already_drafted" };
+    // Idempotency: if already completed (drafted or beyond), skip
+    const completedStatuses = ["drafted", "editing", "edited", "optimizing", "ready"];
+    if (completedStatuses.includes(task.status)) {
+      console.log(`Task ${taskId} already processed (status: ${task.status}), skipping`);
+      return { taskId, status: "already_processed" };
     }
 
-    // Only process tasks in expected statuses
+    // Allow retries for in-progress writing
     const isRevision = task.status === "revision_requested";
     const isFirstDraft = task.status === "researched";
+    const isRetry = task.status === "writing";
 
-    if (!isFirstDraft && !isRevision) {
+    if (!isFirstDraft && !isRevision && !isRetry) {
       console.error(`Task ${taskId} has unexpected status: ${task.status}`);
       await updateTaskStatus(taskId, "failed", {
         error: `Cannot write from status: ${task.status}`
@@ -112,8 +114,10 @@ module.exports.handler = async (event) => {
       throw new Error(`Task ${taskId} has no research s3Key`);
     }
 
-    // Update status to writing
-    await updateTaskStatus(taskId, "writing");
+    // Update status to writing (idempotent if already writing)
+    if (task.status !== "writing") {
+      await updateTaskStatus(taskId, "writing");
+    }
 
     // Fetch the research from S3
     const researchContent = await getS3Object(task.s3Key);
@@ -190,7 +194,19 @@ module.exports.handler = async (event) => {
       revisionCount
     });
 
-    console.log(`Draft ${isRevision ? "revised" : "created"} for task ${taskId}: ${draftS3Key}`);
+    // Enqueue edit job — non-fatal since draft is already persisted.
+    // If this fails, the task stays "drafted" and can be re-triggered via cli.js draft.
+    try {
+      if (!process.env.EDIT_QUEUE_URL) {
+        console.error(`EDIT_QUEUE_URL not set — skipping edit enqueue for task ${taskId}`);
+      } else {
+        await sendSqsMessage(process.env.EDIT_QUEUE_URL, { taskId });
+        console.log(`Draft ${isRevision ? "revised" : "created"} for task ${taskId}: ${draftS3Key} — edit job enqueued`);
+      }
+    } catch (enqueueErr) {
+      console.error(`Draft saved but failed to enqueue edit job for ${taskId}:`, enqueueErr);
+    }
+
     return { taskId, draftS3Key, status: "drafted", revisionCount };
   } catch (error) {
     console.error(`Writing failed for task ${taskId}:`, error);

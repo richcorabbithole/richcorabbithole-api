@@ -17,6 +17,8 @@ const path = require("path");
 const RESEARCH_PATH = path.resolve(__dirname, "../../src/research.js");
 const WORKER_PATH = path.resolve(__dirname, "../../src/researchWorker.js");
 const WRITE_WORKER_PATH = path.resolve(__dirname, "../../src/writeWorker.js");
+const EDIT_WORKER_PATH = path.resolve(__dirname, "../../src/editWorker.js");
+const SEO_WORKER_PATH = path.resolve(__dirname, "../../src/seoWorker.js");
 const SHARED_UTILS_PATH = path.resolve(__dirname, "../../src/lib/shared-utils.js");
 
 /**
@@ -224,6 +226,8 @@ function setupWorkerMocks(mockSend, mockCreate, options = {}) {
   process.env.SECRET_ID = "test/anthropic-api-key";
   process.env.STAGE = "test";
   process.env.WRITE_QUEUE_URL = "https://sqs.us-east-1.amazonaws.com/123456789/test-write-queue";
+  process.env.EDIT_QUEUE_URL = "https://sqs.us-east-1.amazonaws.com/123456789/test-edit-queue";
+  process.env.SEO_QUEUE_URL = "https://sqs.us-east-1.amazonaws.com/123456789/test-seo-queue";
 
   // Load handler with faked dependencies
   const handler = require(handlerPath).handler;
@@ -242,9 +246,11 @@ function setupWorkerMocks(mockSend, mockCreate, options = {}) {
     delete process.env.SECRET_ID;
     delete process.env.STAGE;
     delete process.env.WRITE_QUEUE_URL;
+    delete process.env.EDIT_QUEUE_URL;
+    delete process.env.SEO_QUEUE_URL;
   };
 
   return { handler, cleanup };
 }
 
-module.exports = { setupResearchMocks, setupWorkerMocks, WORKER_PATH, WRITE_WORKER_PATH };
+module.exports = { setupResearchMocks, setupWorkerMocks, WORKER_PATH, WRITE_WORKER_PATH, EDIT_WORKER_PATH, SEO_WORKER_PATH };
