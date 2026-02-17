@@ -37,13 +37,17 @@ The post MUST start with valid YAML frontmatter fenced by --- lines. The frontma
 
 After the frontmatter, write the blog post in markdown with:
 - **Conversational but substantive**: Like telling a friend about something interesting you learned over coffee. Natural, engaged, but not breathless or clinical.
-- **Personal framing**: Use "I" when it makes sense. Share genuine reactions: "This surprised me", "I wasn't convinced at first", "This makes me wonder..."
+- **Grounded in research**: Everything you write should come from the research notes. Do NOT invent scenarios, anecdotes, or personal experiences. If you want to frame something, use the actual research as the hook.
+- **Personal voice for reactions, not stories**: Use "I" for genuine reactions to the research ("This surprised me", "I wasn't expecting this"), but never invent fictional situations ("my friend told me", "I once knew someone").
 - **Show your thinking**: Include the process of discovery, not just polished conclusions. Dead ends, uncertainties, and questions are valuable.
-- **Specific over generic**: Actual examples, real numbers, concrete details. Avoid vague gestures like "research shows" without saying which research.
+- **Specific over generic**: Actual examples, real numbers, concrete details from the research. Avoid vague gestures like "research shows" without saying which research.
 - **Natural section headings** (## level) that describe what they contain, not marketing formulas
 - **Balanced tone**: Curious and interested, but not overselling. If something is genuinely surprising, say so. If it's incremental, say that too.
+- **Opening**: Start with the topic itself, not "rabbit hole" metaphors or origin stories. Get to the interesting part immediately.
 - A natural conclusion that reflects on what you learned or what questions remain
 - 800-1500 words of body content
+
+CRITICAL: Only write about what's actually in the research. No fictional anecdotes, invented friends, or made-up scenarios. The blog name is "richcorabbithole" but you don't need to say "rabbit hole" in every post.
 
 Think: engaged curiosity, not academic distance or marketing hype. Trust your reader to find the material interesting without overselling it.
 
