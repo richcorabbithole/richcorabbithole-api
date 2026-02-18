@@ -158,9 +158,23 @@ ${researchContent.slice(0, 3000)}`;
         catResult = { category: "other", isNew: false, color: null };
       }
 
+      // Validate model output before trusting it. A misbehaving model could return
+      // anything; an invalid slug would corrupt DynamoDB, TS/CSS files, and the site schema.
+      // Enforce the same rules as research.js: lowercase slug, max 32 chars.
+      const SLUG_RE = /^[a-z][a-z0-9-]*$/;
+      const rawCategory = typeof catResult.category === "string" ? catResult.category.trim() : "";
+      const isValidSlug = SLUG_RE.test(rawCategory) && rawCategory.length <= 32;
+      if (!isValidSlug) {
+        console.warn(`Model returned invalid category slug "${rawCategory}", falling back to "other"`);
+        catResult = { category: "other", isNew: false, color: null };
+      }
+
       resolvedCategory = catResult.category || "other";
       isNewCategory = catResult.isNew === true && !knownCategories.includes(resolvedCategory);
-      newCategoryColor = isNewCategory ? (catResult.color || "#7a7a7a") : null;
+      // Validate color too — only accept a basic hex value to prevent injection into CSS
+      const rawColor = typeof catResult.color === "string" ? catResult.color.trim() : null;
+      const isValidColor = rawColor && /^#[0-9a-fA-F]{3,8}$/.test(rawColor);
+      newCategoryColor = isNewCategory ? (isValidColor ? rawColor : "#7a7a7a") : null;
     }
 
     console.log(`Task ${taskId} category resolved: ${resolvedCategory} (isNew: ${isNewCategory})`);

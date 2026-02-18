@@ -8,7 +8,7 @@
  * created once per Lambda cold start and reused across invocations.
  */
 
-const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
+const { DynamoDBClient, UpdateItemCommand } = require("@aws-sdk/client-dynamodb");
 const { DynamoDBDocumentClient, UpdateCommand, GetCommand } = require("@aws-sdk/lib-dynamodb");
 const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { SQSClient, SendMessageCommand } = require("@aws-sdk/client-sqs");
@@ -310,34 +310,51 @@ async function getKnownCategories() {
       Key: { taskId: CATEGORIES_CONFIG_KEY }
     })
   );
-  if (result.Item && Array.isArray(result.Item.values) && result.Item.values.length > 0) {
-    return result.Item.values;
+  if (result.Item && result.Item.values) {
+    // The Document client unmarshals a DynamoDB String Set (SS) as a JS Set object,
+    // and a List (L) as an Array. Support both so old List-format items still work.
+    const vals = result.Item.values;
+    const arr = vals instanceof Set ? [...vals] : Array.isArray(vals) ? vals : null;
+    if (arr && arr.length > 0) return arr;
   }
   return [...DEFAULT_CATEGORIES];
 }
 
 /**
- * Append a new category to the known categories list in DynamoDB.
- * Uses list_append so concurrent writes are safe (last writer wins on the append).
+ * Add a new category to the known categories string set in DynamoDB.
+ *
+ * Uses ADD on a String Set (SS) rather than list_append on a List (L).
+ * ADD is idempotent — adding a value that already exists is a no-op, so
+ * retries and concurrent calls for the same category are safe without
+ * a read-before-write.
+ *
+ * Note: getKnownCategories() reads the `values` attribute. If the item was
+ * previously written as a List (L), this write will fail because you cannot
+ * ADD to a List. A fresh table will always get SS from the first write.
  *
  * @param {string} category - lowercase slug to add (e.g. "space", "true-crime")
  * @returns {Promise<void>}
  */
 async function addKnownCategory(category) {
-  // Use UpdateItem with list_append + if_not_exists to handle the item not existing yet.
-  await docClient.send(
-    new UpdateCommand({
+  // Use ADD on a DynamoDB String Set (SS) rather than list_append on a List (L).
+  // ADD is idempotent — adding a value that already exists is a no-op, so
+  // retries and concurrent calls for the same category are inherently safe.
+  //
+  // We use the raw DynamoDBClient (not the Document client) because the
+  // Document client marshals JS arrays as DynamoDB Lists, not String Sets.
+  // String Sets require explicit { SS: [...] } type descriptors.
+  await dynamoClient.send(
+    new UpdateItemCommand({
       TableName: process.env.TABLE_NAME,
-      Key: { taskId: CATEGORIES_CONFIG_KEY },
-      UpdateExpression: "SET #vals = list_append(if_not_exists(#vals, :empty), :newcat), #status = :status",
+      Key: { taskId: { S: CATEGORIES_CONFIG_KEY } },
+      UpdateExpression: "ADD #vals :newcat SET #status = :status",
       ExpressionAttributeNames: {
         "#vals": "values",
         "#status": "status"
       },
       ExpressionAttributeValues: {
-        ":newcat": [category],
-        ":empty": [],
-        ":status": "config"
+        ":newcat": { SS: [category] },
+        ":status": { S: "config" }
       }
     })
   );

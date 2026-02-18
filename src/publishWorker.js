@@ -190,12 +190,13 @@ async function commitNewCategorySiteFiles(repoPath, branchName, token, category,
 
   // 2. categoryConfig.ts — add record entry
   const { content: catConfigContent, sha: catConfigSha } = await getRepoFile(repoPath, SITE_CAT_CONFIG_PATH, branchName, token);
-  // Append new entry before the closing brace of the categoryConfig object
-  const newEntry = `  ${category}:   { label: '${label}', color: 'var(${cssVar})' },`;
+  // Quote the key so hyphenated slugs (e.g. "true-crime") produce valid TS object literals.
+  const newEntry = `  '${category}': { label: '${label}', color: 'var(${cssVar})' },`;
   const updatedCatConfig = catConfigContent.replace(
     /(export const categoryConfig[^{]*\{)([\s\S]*?)(\};)/,
     (_, open, inner, close) => {
-      if (inner.includes(`${category}:`)) return _; // already present
+      // Check for both quoted ('true-crime':) and unquoted (tech:) key forms to avoid duplicates
+      if (inner.includes(`'${category}':`) || inner.includes(`"${category}":`) || inner.match(new RegExp(`\\b${category}\\s*:`))) return _;
       return `${open}${inner}${newEntry}\n${close}`;
     }
   );
