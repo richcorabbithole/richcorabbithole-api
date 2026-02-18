@@ -347,7 +347,7 @@ async function addKnownCategory(category) {
     new UpdateItemCommand({
       TableName: process.env.TABLE_NAME,
       Key: { taskId: { S: CATEGORIES_CONFIG_KEY } },
-      UpdateExpression: "ADD #vals :newcat SET #status = :status",
+      UpdateExpression: "SET #status = :status ADD #vals :newcat",
       ExpressionAttributeNames: {
         "#vals": "values",
         "#status": "status"
