@@ -8,7 +8,7 @@
  * created once per Lambda cold start and reused across invocations.
  */
 
-const { DynamoDBClient, UpdateItemCommand } = require("@aws-sdk/client-dynamodb");
+const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
 const { DynamoDBDocumentClient, UpdateCommand, GetCommand } = require("@aws-sdk/lib-dynamodb");
 const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { SQSClient, SendMessageCommand } = require("@aws-sdk/client-sqs");
@@ -291,17 +291,30 @@ async function sendSqsMessage(queueUrl, body) {
   );
 }
 
-// Config item key for the known categories list stored in DynamoDB.
+// Config item key for the known categories stored in DynamoDB.
 // The item lives in the same table as tasks, keyed on taskId = "config:categories".
+// Schema: { taskId: "config:categories", status: "config", categories: { <slug>: <description> } }
+// The `categories` attribute is a DynamoDB Map (M) — slug → description string.
 const CATEGORIES_CONFIG_KEY = "config:categories";
-// Default seed list — used as fallback if the config item doesn't exist yet.
-const DEFAULT_CATEGORIES = ["tech", "science", "history", "gaming", "maker", "other"];
+
+// Seed data — used as fallback if the config item is missing or empty.
+// Each entry: { slug, description }
+const DEFAULT_CATEGORIES = [
+  { slug: "tech",        description: "computers, software, AI, electronics, and the internet" },
+  { slug: "science",     description: "biology, physics, chemistry, astronomy, medicine, and natural phenomena" },
+  { slug: "history",     description: "historical events, figures, eras, and cultural history" },
+  { slug: "gaming",      description: "video games, tabletop games, game design, and gaming culture" },
+  { slug: "maker",       description: "DIY projects, hardware, crafts, woodworking, electronics builds, and hands-on making" },
+  { slug: "pop-culture", description: "fictional characters, movies, TV shows, comics, anime, music artists, and media franchises" },
+  { slug: "other",       description: "topics that don't fit any other category" },
+];
 
 /**
  * Fetch the known hyperfixation categories from DynamoDB.
+ * Returns an array of { slug, description } objects.
  * Falls back to DEFAULT_CATEGORIES if the config item is missing.
  *
- * @returns {Promise<string[]>}
+ * @returns {Promise<Array<{slug: string, description: string}>>}
  */
 async function getKnownCategories() {
   const result = await docClient.send(
@@ -310,52 +323,63 @@ async function getKnownCategories() {
       Key: { taskId: CATEGORIES_CONFIG_KEY }
     })
   );
-  if (result.Item && result.Item.values) {
-    // The Document client unmarshals a DynamoDB String Set (SS) as a JS Set object,
-    // and a List (L) as an Array. Support both so old List-format items still work.
-    const vals = result.Item.values;
-    const arr = vals instanceof Set ? [...vals] : Array.isArray(vals) ? vals : null;
-    if (arr && arr.length > 0) return arr;
+  if (result.Item) {
+    // New schema: categories Map (M) — slug → description string.
+    if (result.Item.categories && typeof result.Item.categories === "object") {
+      const entries = Object.entries(result.Item.categories);
+      if (entries.length > 0) {
+        return entries.map(([slug, description]) => ({ slug, description }));
+      }
+    }
+
+    // Legacy schema: values String Set (SS) or List (L) — slug only, no descriptions.
+    // Preserved for backward compatibility until the seed script is run on existing deployments.
+    // Descriptions are synthesised from DEFAULT_CATEGORIES where known, falling back to a
+    // generic phrase so the classifier still gets useful context.
+    if (result.Item.values) {
+      const vals = result.Item.values;
+      const arr = vals instanceof Set ? [...vals] : Array.isArray(vals) ? vals : null;
+      if (arr && arr.length > 0) {
+        const defaultMap = new Map(DEFAULT_CATEGORIES.map(c => [c.slug, c.description]));
+        return arr.map(slug => ({
+          slug,
+          description: defaultMap.get(slug) ?? `topics related to ${slug}`,
+        }));
+      }
+    }
   }
   return [...DEFAULT_CATEGORIES];
 }
 
 /**
- * Add a new category to the known categories string set in DynamoDB.
+ * Add a new category to the known categories map in DynamoDB.
  *
- * Uses ADD on a String Set (SS) rather than list_append on a List (L).
- * ADD is idempotent — adding a value that already exists is a no-op, so
- * retries and concurrent calls for the same category are safe without
- * a read-before-write.
+ * Uses SET with if_not_exists to write the slug → description entry idempotently.
+ * Concurrent calls for the same slug are safe — if_not_exists is a no-op when the
+ * key already exists, so the first description written wins.
  *
- * Note: getKnownCategories() reads the `values` attribute. If the item was
- * previously written as a List (L), this write will fail because you cannot
- * ADD to a List. A fresh table will always get SS from the first write.
- *
- * @param {string} category - lowercase slug to add (e.g. "space", "true-crime")
+ * @param {string} slug - lowercase slug to add (e.g. "food", "true-crime")
+ * @param {string} description - short phrase describing what belongs in this category
  * @returns {Promise<void>}
  */
-async function addKnownCategory(category) {
-  // Use ADD on a DynamoDB String Set (SS) rather than list_append on a List (L).
-  // ADD is idempotent — adding a value that already exists is a no-op, so
-  // retries and concurrent calls for the same category are inherently safe.
-  //
-  // We use the raw DynamoDBClient (not the Document client) because the
-  // Document client marshals JS arrays as DynamoDB Lists, not String Sets.
-  // String Sets require explicit { SS: [...] } type descriptors.
-  await dynamoClient.send(
-    new UpdateItemCommand({
+async function addKnownCategory(slug, description) {
+  // SET #categories.#slug = if_not_exists(#categories.#slug, :desc)
+  // DynamoDB requires expression attribute names for map key paths when the key
+  // could be a reserved word or contain special characters (hyphens, etc.).
+  await docClient.send(
+    new UpdateCommand({
       TableName: process.env.TABLE_NAME,
-      Key: { taskId: { S: CATEGORIES_CONFIG_KEY } },
-      UpdateExpression: "SET #status = :status ADD #vals :newcat",
+      Key: { taskId: CATEGORIES_CONFIG_KEY },
+      UpdateExpression: "SET #status = :status, #cats.#slug = if_not_exists(#cats.#slug, :desc)",
       ExpressionAttributeNames: {
-        "#vals": "values",
-        "#status": "status"
+        "#status": "status",
+        "#cats": "categories",
+        "#slug": slug,
       },
       ExpressionAttributeValues: {
-        ":newcat": { SS: [category] },
-        ":status": { S: "config" }
-      }
+        ":status": "config",
+        ":desc": description,
+      },
     })
   );
 }

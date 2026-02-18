@@ -104,11 +104,18 @@ Be thorough but concise. Focus on accuracy and include URLs for all cited source
 
     // --- Category resolution ---
     let resolvedCategory;
+    let resolvedCategoryDescription = null;
     let isNewCategory = false;
     let newCategoryColor = null;
 
     // Shared slug validation — enforced for both user-supplied and model-output categories.
     const SLUG_RE = /^[a-z][a-z0-9-]*$/;
+
+    // How much better a proposed new category must score over the best existing
+    // category before we create it. Kept intentionally low (0.05) so that genuinely
+    // distinct topics aren't forced into a broad bucket, while still biasing toward
+    // reuse when the fit is roughly equal.
+    const NEW_CATEGORY_THRESHOLD = 0.05;
 
     if (providedCategory) {
       // Defensively validate even user-supplied categories: the worker is an SQS consumer
@@ -118,9 +125,11 @@ Be thorough but concise. Focus on accuracy and include URLs for all cited source
         // Still check whether this is a new category so publishWorker updates
         // config.ts, categoryConfig.ts, global.css, and DynamoDB appropriately.
         const knownCategories = await getKnownCategories();
-        if (!knownCategories.includes(resolvedCategory)) {
+        const existing = knownCategories.find(c => c.slug === resolvedCategory);
+        if (!existing) {
           isNewCategory = true;
           newCategoryColor = "#7a7a7a"; // default muted color for user-supplied new categories
+          resolvedCategoryDescription = `topics related to ${resolvedCategory}`;
         }
       } else {
         console.warn(`Provided category "${providedCategory}" failed validation, falling back to auto-categorization`);
@@ -130,37 +139,46 @@ Be thorough but concise. Focus on accuracy and include URLs for all cited source
 
     if (!resolvedCategory) {
       // Fetch the current known categories from DynamoDB (stays in sync as new ones are added).
+      // Each entry is { slug, description } — descriptions travel with slugs so the classifier
+      // always has accurate, up-to-date guidance even as categories evolve over time.
       const knownCategories = await getKnownCategories();
 
-      // Ask Claude to pick the best-fit category or invent a new one.
-      // System prompt enforces strict classifier behaviour — role framing here is persistent
-      // and not overridable by the creative reasoning the model applies to user-turn text.
-      const categorySystemPrompt = `You are a strict category classifier for the richcorabbithole blog. Your only job is to assign one category slug.
+      const categoryListText = knownCategories
+        .map(c => `- ${c.slug}: ${c.description}`)
+        .join("\n");
+
+      // Scoring-based classifier: ask Claude to score fit (0.0–1.0) for each existing
+      // category AND optionally propose one new category with its own score.
+      // A new category wins only when its score exceeds the best existing score by at
+      // least NEW_CATEGORY_THRESHOLD (0.05), preventing broad categories from absorbing
+      // everything simply because they are loosely applicable.
+      const categorySystemPrompt = `You are a category classifier for the richcorabbithole blog. Score how well this blog post fits each category.
 
 Rules:
-- STRONGLY prefer an existing category. Only create a new one when no existing category is even a loose fit.
-- The existing categories cover a very wide range intentionally: a topic involving computers, software, AI, or electronics is "tech"; biology, physics, chemistry, astronomy, or medicine is "science"; anything you build or DIY is "maker". When in doubt, prefer a broad existing category over a narrow new one.
-- Niche vocabulary does NOT justify a new category. A post about CRISPR is "science", not "genomics". A post about mechanical keyboards is "maker", not "hardware".
-- A new category is justified ONLY when the topic's primary domain is genuinely not covered by any existing category (e.g. a cooking topic → "food"; a sports topic → "sports"; a personal finance topic → "finance").
+- Score each existing category from 0.0 (no fit) to 1.0 (perfect fit) based on the post's PRIMARY domain.
+- The primary domain is what the post is fundamentally about, not incidental themes. A post about a fictional character is "pop-culture" even if that character uses technology.
+- Optionally propose ONE new category if the topic's primary domain is genuinely not covered by any existing category. Only propose a new category if it would score materially higher than all existing ones.
 - You must respond with ONLY valid JSON — no markdown, no explanation, no extra text.`;
 
-      const categoryPrompt = `Existing categories: ${knownCategories.join(", ")}
+      const categoryPrompt = `Existing categories:
+${categoryListText}
 
-Assign a category to this blog post. Use an existing category unless the topic clearly does not belong to any of them. Do not create a new category just because the topic is specific or uses niche vocabulary.
-
-Only set "isNew": true if you are inventing a slug that does not appear in the existing list above.
+Score each category for this blog post, then optionally propose a new one.
 
 Respond with ONLY this JSON shape:
-{"category":"<slug>","isNew":<true|false>,"color":"<muted hex if isNew, else null>"}
+{
+  "scores": { "<existing-slug>": <0.0-1.0>, ... },
+  "proposed": { "slug": "<new-slug>", "score": <0.0-1.0>, "description": "<short phrase describing what belongs here>", "color": "<muted hex>" } | null
+}
 
-If isNew is true, pick a muted hex color fitting a retro-future / Pip-Boy vault aesthetic (e.g. #5a9a8a, #8a7aaa, #aa8a5a, #5a8a6a, #aa5a5a, #7a7a7a).
+For "color" if proposing a new category, pick a muted hex fitting a retro-future / Pip-Boy vault aesthetic (e.g. #5a9a8a, #8a7aaa, #aa8a5a, #5a8a6a, #aa5a5a, #7a7a7a, #9a7a5a).
 
 Research excerpt:
 ${researchContent.slice(0, 3000)}`;
 
       const catMessage = await anthropicInstance.messages.create({
         model: "claude-sonnet-4-20250514",
-        max_tokens: 256,
+        max_tokens: 512,
         system: categorySystemPrompt,
         messages: [{ role: "user", content: categoryPrompt }]
       });
@@ -173,24 +191,47 @@ ${researchContent.slice(0, 3000)}`;
         catResult = JSON.parse(catTextBlock.text.trim());
       } catch {
         console.warn("Failed to parse category JSON, falling back to 'other':", catTextBlock.text);
-        catResult = { category: "other", isNew: false, color: null };
+        catResult = { scores: {}, proposed: null };
       }
 
-      // Validate model output before trusting it. A misbehaving model could return
-      // anything; an invalid slug would corrupt DynamoDB, TS/CSS files, and the site schema.
-      const rawCategory = typeof catResult.category === "string" ? catResult.category.trim() : "";
-      const isValidSlug = SLUG_RE.test(rawCategory) && rawCategory.length <= 32;
-      if (!isValidSlug) {
-        console.warn(`Model returned invalid category slug "${rawCategory}", falling back to "other"`);
-        catResult = { category: "other", isNew: false, color: null };
+      // Find the best-scoring existing category
+      const scores = catResult.scores && typeof catResult.scores === "object" ? catResult.scores : {};
+      let bestSlug = "other";
+      let bestScore = 0;
+      for (const { slug } of knownCategories) {
+        const score = typeof scores[slug] === "number" ? scores[slug] : 0;
+        if (score > bestScore) {
+          bestScore = score;
+          bestSlug = slug;
+        }
       }
 
-      resolvedCategory = catResult.category || "other";
-      isNewCategory = catResult.isNew === true && !knownCategories.includes(resolvedCategory);
-      // Validate color too — only accept a bare hex value to prevent injection into CSS
-      const rawColor = typeof catResult.color === "string" ? catResult.color.trim() : null;
-      const isValidColor = rawColor && /^#[0-9a-fA-F]{3,8}$/.test(rawColor);
-      newCategoryColor = isNewCategory ? (isValidColor ? rawColor : "#7a7a7a") : null;
+      // Evaluate proposed new category — only accept if it clears the threshold AND has a valid slug
+      const proposed = catResult.proposed && typeof catResult.proposed === "object" ? catResult.proposed : null;
+      const rawProposedSlug = typeof proposed?.slug === "string" ? proposed.slug.trim() : "";
+      const proposedScore = typeof proposed?.score === "number" ? proposed.score : 0;
+      const isValidProposedSlug = SLUG_RE.test(rawProposedSlug) && rawProposedSlug.length <= 32;
+      const proposedBeatsExisting = proposedScore - bestScore >= NEW_CATEGORY_THRESHOLD;
+      const proposedIsNew = isValidProposedSlug && !knownCategories.find(c => c.slug === rawProposedSlug);
+
+      if (proposed && isValidProposedSlug && proposedBeatsExisting && proposedIsNew) {
+        resolvedCategory = rawProposedSlug;
+        isNewCategory = true;
+        resolvedCategoryDescription = typeof proposed.description === "string"
+          ? proposed.description.slice(0, 200)
+          : `topics related to ${rawProposedSlug}`;
+        const rawColor = typeof proposed.color === "string" ? proposed.color.trim() : null;
+        const isValidColor = rawColor && /^#[0-9a-fA-F]{3,8}$/.test(rawColor);
+        newCategoryColor = isValidColor ? rawColor : "#7a7a7a";
+        console.log(`Task ${taskId} new category "${resolvedCategory}" proposed (score ${proposedScore}) beats best existing "${bestSlug}" (score ${bestScore})`);
+      } else {
+        resolvedCategory = bestSlug;
+        isNewCategory = false;
+        newCategoryColor = null;
+        if (proposed && isValidProposedSlug && !proposedBeatsExisting) {
+          console.log(`Task ${taskId} proposed category "${rawProposedSlug}" (score ${proposedScore}) did not beat existing "${bestSlug}" (score ${bestScore}) by threshold ${NEW_CATEGORY_THRESHOLD} — using existing`);
+        }
+      }
     }
 
     console.log(`Task ${taskId} category resolved: ${resolvedCategory} (isNew: ${isNewCategory})`);
@@ -203,6 +244,7 @@ ${researchContent.slice(0, 3000)}`;
       isNewCategory,
     };
     if (newCategoryColor) researchedFields.newCategoryColor = newCategoryColor;
+    if (resolvedCategoryDescription) researchedFields.categoryDescription = resolvedCategoryDescription;
     await updateTaskStatus(taskId, "researched", researchedFields);
 
     // Enqueue write job — non-fatal since research is already persisted.

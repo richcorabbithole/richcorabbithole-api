@@ -438,8 +438,9 @@ module.exports.handler = async (event) => {
     // rather than frontmatter.hyperfixation (model-generated, unvalidated at this point).
     if (task.isNewCategory && task.category) {
       try {
-        await addKnownCategory(task.category);
-        console.log(`Added new category to DynamoDB: ${task.category}`);
+        const description = task.categoryDescription || `topics related to ${task.category}`;
+        await addKnownCategory(task.category, description);
+        console.log(`Added new category to DynamoDB: ${task.category} — "${description}"`);
       } catch (catErr) {
         // Non-fatal — the PR is already open; category will be missing from DynamoDB
         // but the site schema was already committed as part of the PR.
