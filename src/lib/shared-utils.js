@@ -323,10 +323,29 @@ async function getKnownCategories() {
       Key: { taskId: CATEGORIES_CONFIG_KEY }
     })
   );
-  if (result.Item && result.Item.categories && typeof result.Item.categories === "object") {
-    const entries = Object.entries(result.Item.categories);
-    if (entries.length > 0) {
-      return entries.map(([slug, description]) => ({ slug, description }));
+  if (result.Item) {
+    // New schema: categories Map (M) — slug → description string.
+    if (result.Item.categories && typeof result.Item.categories === "object") {
+      const entries = Object.entries(result.Item.categories);
+      if (entries.length > 0) {
+        return entries.map(([slug, description]) => ({ slug, description }));
+      }
+    }
+
+    // Legacy schema: values String Set (SS) or List (L) — slug only, no descriptions.
+    // Preserved for backward compatibility until the seed script is run on existing deployments.
+    // Descriptions are synthesised from DEFAULT_CATEGORIES where known, falling back to a
+    // generic phrase so the classifier still gets useful context.
+    if (result.Item.values) {
+      const vals = result.Item.values;
+      const arr = vals instanceof Set ? [...vals] : Array.isArray(vals) ? vals : null;
+      if (arr && arr.length > 0) {
+        const defaultMap = new Map(DEFAULT_CATEGORIES.map(c => [c.slug, c.description]));
+        return arr.map(slug => ({
+          slug,
+          description: defaultMap.get(slug) ?? `topics related to ${slug}`,
+        }));
+      }
     }
   }
   return [...DEFAULT_CATEGORIES];
