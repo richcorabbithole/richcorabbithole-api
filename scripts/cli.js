@@ -4,11 +4,13 @@
  * Unified CLI for the richcorabbithole pipeline.
  *
  * Subcommands:
+ *   publish <topic>           — Run the full pipeline (Research → Write → Edit → SEO → Publish) with live progress
  *   research --topic <topic>  — Trigger a research task via the API (SigV4-signed)
  *   draft <taskId>            — Enqueue a write job for an already-researched task
  *   read-draft <taskId>       — Display the current draft for a task
  *
  * Usage:
+ *   node scripts/cli.js publish "quantum computing" --category tech --stage dev --profile richcorabbithole
  *   node scripts/cli.js research --topic "serverless architecture" --stage dev --profile richcorabbithole
  *   node scripts/cli.js draft <taskId> --stage dev --profile richcorabbithole
  *   node scripts/cli.js read-draft <taskId> --stage dev --profile richcorabbithole
@@ -29,6 +31,7 @@ const args = process.argv.slice(2);
 const command = args[0];
 const positionalArgs = [];
 let topic = null;
+let category = null;
 let stage = "dev";
 let profile = null;
 
@@ -39,6 +42,13 @@ for (let i = 1; i < args.length; i++) {
       process.exit(1);
     }
     topic = args[i + 1];
+    i++;
+  } else if (args[i] === "--category") {
+    if (!args[i + 1] || args[i + 1].startsWith("--")) {
+      console.error("Error: --category flag requires a value");
+      process.exit(1);
+    }
+    category = args[i + 1];
     i++;
   } else if (args[i] === "--stage") {
     if (!args[i + 1] || args[i + 1].startsWith("--")) {
@@ -345,16 +355,218 @@ async function readDraftCommand(taskId) {
   }
 }
 
+/**
+ * publish <topic> — Trigger the full pipeline and show live progress.
+ */
+async function publishCommand(publishTopic) {
+  if (!publishTopic) {
+    console.error("Usage: node scripts/cli.js publish \"your topic\" [--category tech] [--stage dev] [--profile name]");
+    process.exit(1);
+  }
+
+  // Categories are open-ended — the pipeline can invent new ones automatically.
+  // When explicitly provided, validate it is a well-formed lowercase slug.
+  if (category && !/^[a-z][a-z0-9-]*$/.test(category)) {
+    console.error(`Error: Invalid category "${category}". Must be a lowercase word or hyphenated slug (e.g. "tech", "true-crime").`);
+    process.exit(1);
+  }
+
+  const hostname = ENDPOINTS[stage];
+
+  const { SignatureV4 } = require("@smithy/signature-v4");
+  const { HttpRequest } = require("@smithy/protocol-http");
+  const { defaultProvider } = require("@aws-sdk/credential-provider-node");
+  const { Hash } = require("@smithy/hash-node");
+  const https = require("https");
+
+  console.log(`🚀 Starting pipeline (${stage})...`);
+  console.log(`📝 Topic: ${publishTopic}`);
+  if (category) console.log(`🏷️  Category: ${category}`);
+  console.log();
+
+  const requestBody = { topic: publishTopic };
+  if (category) requestBody.category = category;
+  const bodyStr = JSON.stringify(requestBody);
+
+  const request = new HttpRequest({
+    method: "POST",
+    protocol: "https:",
+    hostname: hostname,
+    path: "/research",
+    headers: {
+      "Content-Type": "application/json",
+      "Content-Length": String(Buffer.byteLength(bodyStr)),
+      "Host": hostname
+    },
+    body: bodyStr
+  });
+
+  const signer = new SignatureV4({
+    credentials: profile ? fromIni({ profile }) : defaultProvider(),
+    region: "us-east-1",
+    service: "execute-api",
+    sha256: Hash.bind(null, "sha256")
+  });
+
+  const signedRequest = await signer.sign(request);
+
+  const response = await new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: signedRequest.hostname,
+      path: signedRequest.path,
+      method: signedRequest.method,
+      headers: signedRequest.headers
+    }, (res) => {
+      let data = "";
+      res.on("data", chunk => data += chunk);
+      res.on("end", () => resolve({ statusCode: res.statusCode, body: data }));
+    });
+    req.on("error", reject);
+    req.write(bodyStr);
+    req.end();
+  });
+
+  if (response.statusCode >= 400) {
+    console.error(`❌ Failed to start pipeline (${response.statusCode}): ${response.body}`);
+    process.exit(1);
+  }
+
+  let result;
+  try {
+    result = JSON.parse(response.body);
+  } catch (e) {
+    console.error(`❌ Unexpected response: ${response.body}`);
+    process.exit(1);
+  }
+
+  const { taskId } = result;
+  console.log(`✅ Pipeline started — task ID: ${taskId}`);
+  console.log();
+
+  // Poll DynamoDB for status updates
+  const STATUS_LABELS = {
+    pending:      "Starting...",
+    researching:  "Researching...",
+    researched:   "Research complete",
+    writing:      "Writing draft...",
+    drafted:      "Draft complete",
+    editing:      "Editing...",
+    edited:       "Edit complete",
+    optimizing:   "SEO optimization...",
+    ready:        "SEO complete",
+    publishing:   "Creating PR...",
+    published:    "Published!",
+    failed:       null  // handled separately
+  };
+
+  const TERMINAL_STATUSES = ["published", "failed"];
+
+  const clientConfig = makeClientConfig();
+  const dynamoClient = new DynamoDBClient(clientConfig);
+  const docClient = DynamoDBDocumentClient.from(dynamoClient);
+
+  const startTime = Date.now();
+  let lastStatus = null;
+
+  while (true) {
+    await new Promise(resolve => setTimeout(resolve, 3000));
+
+    let taskResult;
+    try {
+      taskResult = await docClient.send(
+        new GetCommand({ TableName: TABLE_NAME, Key: { taskId } })
+      );
+    } catch (err) {
+      console.error(`⚠️  Failed to poll status: ${err.message}`);
+      continue;
+    }
+
+    const task = taskResult.Item;
+    if (!task) {
+      console.error(`❌ Task ${taskId} not found`);
+      process.exit(1);
+    }
+
+    const { status } = task;
+
+    if (status !== lastStatus) {
+      if (status === "failed") {
+        console.error(`❌ Pipeline failed: ${task.error || "Unknown error"}`);
+        process.exit(1);
+      }
+
+      const label = STATUS_LABELS[status] || status;
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+      console.log(`[${elapsed}s] ${label}`);
+      lastStatus = status;
+    }
+
+    if (TERMINAL_STATUSES.includes(status)) {
+      if (status === "published") {
+        const totalSecs = ((Date.now() - startTime) / 1000).toFixed(0);
+        console.log();
+        console.log("--- Summary ---");
+        console.log(`Task ID:  ${taskId}`);
+        console.log(`S3 file:  ${task.finalS3Key}`);
+
+        if (task.prUrl) {
+          console.log(`PR:       ${task.prUrl}`);
+        }
+        if (task.branchName) {
+          console.log(`Branch:   ${task.branchName}`);
+        }
+
+        // Print stage timestamps if available
+        const timestamps = {};
+        if (task.researchedAt)  timestamps["Researched"] = task.researchedAt;
+        if (task.draftedAt)     timestamps["Drafted"]    = task.draftedAt;
+        if (task.editedAt)      timestamps["Edited"]     = task.editedAt;
+        if (task.readyAt)       timestamps["Ready"]      = task.readyAt;
+        if (task.publishedAt)   timestamps["Published"]  = task.publishedAt;
+
+        if (Object.keys(timestamps).length > 0) {
+          console.log("\nStage timestamps:");
+          for (const [label, ts] of Object.entries(timestamps)) {
+            console.log(`  ${label}: ${ts}`);
+          }
+        }
+
+        // Fetch final file for title + word count
+        try {
+          const s3Client = new S3Client(clientConfig);
+          const s3Result = await s3Client.send(
+            new GetObjectCommand({ Bucket: BUCKET_NAME, Key: task.finalS3Key })
+          );
+          const content = await s3Result.Body.transformToString();
+          const titleMatch = content.match(/^title:\s*["']?(.+?)["']?\s*$/m);
+          if (titleMatch) console.log(`\nTitle: ${titleMatch[1]}`);
+          const fmEnd = content.indexOf("\n---\n", 4);
+          const body = fmEnd !== -1 ? content.slice(fmEnd + 5) : content;
+          console.log(`Word count: ${countWords(body)}`);
+        } catch (err) {
+          // Non-fatal — summary still useful without content details
+          console.log(`(Could not fetch file for title/word count: ${err.message})`);
+        }
+
+        console.log(`\nTotal time: ${totalSecs}s`);
+      }
+      break;
+    }
+  }
+}
+
 // --- Main ---
 
 async function main() {
   if (!command) {
     console.error("Usage: node scripts/cli.js <command> [options]");
     console.error("\nCommands:");
+    console.error("  publish <topic>           Run the full pipeline with live progress");
     console.error("  research --topic <topic>  Trigger a research task via the API");
     console.error("  draft <taskId>            Enqueue a write job for an already-researched task");
     console.error("  read-draft <taskId>       Display the current draft for a task");
     console.error("\nFlags:");
+    console.error("  --category <cat>    Blog category: tech, science, history, gaming, maker, other");
     console.error("  --stage <stage>     Target stage: dev or prod (default: dev)");
     console.error("  --profile <name>    AWS CLI profile for credentials");
     process.exit(1);
@@ -362,6 +574,9 @@ async function main() {
 
   try {
     switch (command) {
+      case "publish":
+        await publishCommand(positionalArgs[0]);
+        break;
       case "research":
         await researchCommand();
         break;
@@ -373,7 +588,7 @@ async function main() {
         break;
       default:
         console.error(`Unknown command: ${command}`);
-        console.error("\nAvailable commands: research, draft, read-draft");
+        console.error("\nAvailable commands: publish, research, draft, read-draft");
         process.exit(1);
     }
   } catch (error) {

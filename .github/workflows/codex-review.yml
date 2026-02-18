@@ -120,36 +120,15 @@ jobs:
               return;
             }
 
-            const header = '## 🤖 Codex Code Review\n\n';
-            const footer = '\n\n---\n*Automated review by [OpenAI Codex CLI](https://github.com/openai/codex) · triggered on PR to `development`*';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const header = `## 🤖 Codex Code Review\n\n`;
+            const footer = `\n\n---\n*Automated review by [OpenAI Codex CLI](https://github.com/openai/codex) · [run #${context.runNumber}](${runUrl}) · triggered on PR to \`development\`*`;
             const body = header + message + footer;
 
-            // Check for an existing Codex review comment to update instead of duplicating
-            const { data: comments } = await github.rest.issues.listComments({
+            await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
+              body: body,
             });
-
-            const existing = comments.find(c =>
-              c.body.includes('🤖 Codex Code Review') &&
-              c.user.login === 'github-actions[bot]'
-            );
-
-            if (existing) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: existing.id,
-                body: body,
-              });
-              console.log(`Updated existing review comment #${existing.id}`);
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: body,
-              });
-              console.log('Posted new review comment');
-            }
+            console.log('Posted new review comment');
