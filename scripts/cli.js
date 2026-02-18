@@ -557,6 +557,12 @@ async function publishCommand(publishTopic) {
 
 // --- Main ---
 
+/**
+ * CLI entry point. Parses the subcommand from argv and dispatches to the
+ * appropriate command function (publish, research, draft, read-draft).
+ *
+ * @returns {Promise<void>}
+ */
 async function main() {
   if (!command) {
     console.error("Usage: node scripts/cli.js <command> [options]");

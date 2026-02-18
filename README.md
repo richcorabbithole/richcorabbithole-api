@@ -191,7 +191,7 @@ npm run read-draft -- <taskId> --profile richcorabbithole
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--topic` | (required for `research`) | Research topic (max 500 characters) |
-| `--category` | (optional) | Blog category: `tech`, `science`, `history`, `gaming`, `maker`, `other` |
+| `--category` | (optional) | Blog category slug — e.g. `tech`, `science`, `history`, `gaming`, `maker`, `pop-culture`, `other`. New categories can be invented by the pipeline. |
 | `--stage` | `dev` | Target stage (`dev` or `prod`) |
 | `--profile` | `AWS_PROFILE` env var | AWS CLI profile for credentials |
 
