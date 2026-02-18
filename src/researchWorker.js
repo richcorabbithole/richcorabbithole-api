@@ -107,10 +107,21 @@ Be thorough but concise. Focus on accuracy and include URLs for all cited source
     let isNewCategory = false;
     let newCategoryColor = null;
 
+    // Shared slug validation — enforced for both user-supplied and model-output categories.
+    const SLUG_RE = /^[a-z][a-z0-9-]*$/;
+
     if (providedCategory) {
-      // User explicitly specified a category via CLI — use it directly.
-      resolvedCategory = providedCategory;
-    } else {
+      // Defensively validate even user-supplied categories: the worker is an SQS consumer
+      // and must not trust any field unconditionally (guards against replayed/crafted messages).
+      if (SLUG_RE.test(providedCategory) && providedCategory.length <= 32) {
+        resolvedCategory = providedCategory;
+      } else {
+        console.warn(`Provided category "${providedCategory}" failed validation, falling back to auto-categorization`);
+        // resolvedCategory stays unset — falls through to the Claude categorization block below
+      }
+    }
+
+    if (!resolvedCategory) {
       // Fetch the current known categories from DynamoDB (stays in sync as new ones are added).
       const knownCategories = await getKnownCategories();
 
@@ -160,8 +171,6 @@ ${researchContent.slice(0, 3000)}`;
 
       // Validate model output before trusting it. A misbehaving model could return
       // anything; an invalid slug would corrupt DynamoDB, TS/CSS files, and the site schema.
-      // Enforce the same rules as research.js: lowercase slug, max 32 chars.
-      const SLUG_RE = /^[a-z][a-z0-9-]*$/;
       const rawCategory = typeof catResult.category === "string" ? catResult.category.trim() : "";
       const isValidSlug = SLUG_RE.test(rawCategory) && rawCategory.length <= 32;
       if (!isValidSlug) {
@@ -171,7 +180,7 @@ ${researchContent.slice(0, 3000)}`;
 
       resolvedCategory = catResult.category || "other";
       isNewCategory = catResult.isNew === true && !knownCategories.includes(resolvedCategory);
-      // Validate color too — only accept a basic hex value to prevent injection into CSS
+      // Validate color too — only accept a bare hex value to prevent injection into CSS
       const rawColor = typeof catResult.color === "string" ? catResult.color.trim() : null;
       const isValidColor = rawColor && /^#[0-9a-fA-F]{3,8}$/.test(rawColor);
       newCategoryColor = isNewCategory ? (isValidColor ? rawColor : "#7a7a7a") : null;

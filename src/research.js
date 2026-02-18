@@ -43,12 +43,21 @@ module.exports.handler = async (event) => {
     }
 
     // Categories are open-ended — the pipeline can invent new ones.
-    // Validate only that the value is a well-formed lowercase slug.
-    if (category !== undefined && !/^[a-z][a-z0-9-]*$/.test(category)) {
-      return {
-        statusCode: 400,
-        body: JSON.stringify({ error: "Invalid category. Must be a lowercase word or hyphenated slug (e.g. 'tech', 'true-crime')." })
-      };
+    // Validate that the value is a well-formed lowercase slug and within the same
+    // 32-char length cap enforced on model output in researchWorker.
+    if (category !== undefined) {
+      if (!/^[a-z][a-z0-9-]*$/.test(category)) {
+        return {
+          statusCode: 400,
+          body: JSON.stringify({ error: "Invalid category. Must be a lowercase word or hyphenated slug (e.g. 'tech', 'true-crime')." })
+        };
+      }
+      if (category.length > 32) {
+        return {
+          statusCode: 400,
+          body: JSON.stringify({ error: "category must be 32 characters or fewer." })
+        };
+      }
     }
 
     const taskId = randomUUID();

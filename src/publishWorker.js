@@ -176,43 +176,51 @@ async function commitNewCategorySiteFiles(repoPath, branchName, token, category,
 
   // 1. config.ts — add to z.enum([...]) array
   const { content: configContent, sha: configSha } = await getRepoFile(repoPath, SITE_CONFIG_PATH, branchName, token);
-  // Match the enum values array and append the new category
-  const updatedConfig = configContent.replace(
-    /(hyperfixation:\s*z\.enum\(\[)([\s\S]*?)(\]\))/,
-    (_, open, inner, close) => {
-      const trimmed = inner.trimEnd();
-      // Avoid duplicates
-      if (trimmed.includes(`'${category}'`) || trimmed.includes(`"${category}"`)) return _;
-      return `${open}${trimmed}, '${category}'${close}`;
+  const alreadyInConfig = configContent.includes(`'${category}'`) || configContent.includes(`"${category}"`);
+  let updatedConfig = configContent;
+  if (!alreadyInConfig) {
+    updatedConfig = configContent.replace(
+      /(hyperfixation:\s*z\.enum\(\[)([\s\S]*?)(\]\))/,
+      (_, open, inner, close) => `${open}${inner.trimEnd()}, '${category}'${close}`
+    );
+    if (updatedConfig === configContent) {
+      throw new Error(`commitNewCategorySiteFiles: enum pattern not found in config.ts — file may have been refactored`);
     }
-  );
+  }
   await commitRepoFile(repoPath, SITE_CONFIG_PATH, branchName, token, updatedConfig, configSha, `Add category: ${category}`);
 
   // 2. categoryConfig.ts — add record entry
-  const { content: catConfigContent, sha: catConfigSha } = await getRepoFile(repoPath, SITE_CAT_CONFIG_PATH, branchName, token);
   // Quote the key so hyphenated slugs (e.g. "true-crime") produce valid TS object literals.
+  const { content: catConfigContent, sha: catConfigSha } = await getRepoFile(repoPath, SITE_CAT_CONFIG_PATH, branchName, token);
   const newEntry = `  '${category}': { label: '${label}', color: 'var(${cssVar})' },`;
-  const updatedCatConfig = catConfigContent.replace(
-    /(export const categoryConfig[^{]*\{)([\s\S]*?)(\};)/,
-    (_, open, inner, close) => {
-      // Check for both quoted ('true-crime':) and unquoted (tech:) key forms to avoid duplicates
-      if (inner.includes(`'${category}':`) || inner.includes(`"${category}":`) || inner.match(new RegExp(`\\b${category}\\s*:`))) return _;
-      return `${open}${inner}${newEntry}\n${close}`;
+  const alreadyInCatConfig = catConfigContent.includes(`'${category}':`) || catConfigContent.includes(`"${category}":`)
+    || !!catConfigContent.match(new RegExp(`\\b${category}\\s*:`));
+  let updatedCatConfig = catConfigContent;
+  if (!alreadyInCatConfig) {
+    updatedCatConfig = catConfigContent.replace(
+      /(export const categoryConfig[^{]*\{)([\s\S]*?)(\};)/,
+      (_, open, inner, close) => `${open}${inner}${newEntry}\n${close}`
+    );
+    if (updatedCatConfig === catConfigContent) {
+      throw new Error(`commitNewCategorySiteFiles: categoryConfig pattern not found in categoryConfig.ts — file may have been refactored`);
     }
-  );
+  }
   await commitRepoFile(repoPath, SITE_CAT_CONFIG_PATH, branchName, token, updatedCatConfig, catConfigSha, `Add category: ${category}`);
 
   // 3. global.css — add CSS variable in @theme block after last --color-cat-* line
   const { content: cssContent, sha: cssSha } = await getRepoFile(repoPath, SITE_CSS_PATH, branchName, token);
   const cssLine = `  ${cssVar}: ${color};`;
-  // Insert after the last existing --color-cat-* variable
-  const updatedCss = cssContent.replace(
-    /(--color-cat-[a-z-]+:\s*#[0-9a-fA-F]+;)(?![\s\S]*--color-cat-)/,
-    (match) => {
-      if (cssContent.includes(cssVar)) return match; // already present
-      return `${match}\n${cssLine}`;
+  const alreadyInCss = cssContent.includes(cssVar);
+  let updatedCss = cssContent;
+  if (!alreadyInCss) {
+    updatedCss = cssContent.replace(
+      /(--color-cat-[a-z-]+:\s*#[0-9a-fA-F]+;)(?![\s\S]*--color-cat-)/,
+      (match) => `${match}\n${cssLine}`
+    );
+    if (updatedCss === cssContent) {
+      throw new Error(`commitNewCategorySiteFiles: --color-cat-* pattern not found in global.css — file may have been refactored`);
     }
-  );
+  }
   await commitRepoFile(repoPath, SITE_CSS_PATH, branchName, token, updatedCss, cssSha, `Add category: ${category}`);
 
   console.log(`Committed site file changes for new category: ${category}`);
@@ -274,9 +282,14 @@ module.exports.handler = async (event) => {
     // Parse frontmatter for metadata
     const { frontmatter, body } = parseFrontmatter(postContent);
     const title = frontmatter.title || `post-${taskId.slice(0, 8)}`;
-    // Prefer the Claude-generated slug from frontmatter (short, intentional);
-    // fall back to slugifying the title, then a taskId-based fallback.
-    const slug = frontmatter.slug || slugify(title) || `post-${taskId.slice(0, 8)}`;
+    // Validate the Claude-generated frontmatter slug before using it in git refs and file paths.
+    // Must be a clean lowercase slug (no /, .., spaces, or other invalid ref characters).
+    // Falls back to slugify(title) so a malformed model output can't produce unexpected paths.
+    const SLUG_RE = /^[a-z][a-z0-9-]{0,49}$/;
+    const rawSlug = typeof frontmatter.slug === "string" ? frontmatter.slug.trim() : "";
+    const slug = (SLUG_RE.test(rawSlug) ? rawSlug : null)
+      || slugify(title)
+      || `post-${taskId.slice(0, 8)}`;
     const wordCount = countWords(body);
 
     // Get GitHub token
@@ -371,13 +384,16 @@ module.exports.handler = async (event) => {
       await githubApiRequest("PUT", `${repoPath}/contents/${filePath}`, token, commitPayload);
     }
 
-    // Step 3b: If this post introduces a new category, commit site file changes first
-    if (task.isNewCategory && frontmatter.hyperfixation && task.newCategoryColor) {
+    // Step 3b: If this post introduces a new category, commit site file changes first.
+    // Use task.category (validated and stored by researchWorker) rather than frontmatter.hyperfixation
+    // (model-generated content from the post body) to prevent crafted frontmatter from writing
+    // unexpected keys into repo TS/CSS files.
+    if (task.isNewCategory && task.category && task.newCategoryColor) {
       await commitNewCategorySiteFiles(
         repoPath,
         branchName,
         token,
-        frontmatter.hyperfixation,
+        task.category,
         task.newCategoryColor
       );
     }
@@ -418,11 +434,12 @@ module.exports.handler = async (event) => {
     }
 
     // If this post introduced a new category, persist it to DynamoDB so future
-    // research runs see it immediately (no GitHub App cross-repo scope needed).
-    if (task.isNewCategory && frontmatter.hyperfixation) {
+    // research runs see it immediately. Use task.category (the validated value from DynamoDB)
+    // rather than frontmatter.hyperfixation (model-generated, unvalidated at this point).
+    if (task.isNewCategory && task.category) {
       try {
-        await addKnownCategory(frontmatter.hyperfixation);
-        console.log(`Added new category to DynamoDB: ${frontmatter.hyperfixation}`);
+        await addKnownCategory(task.category);
+        console.log(`Added new category to DynamoDB: ${task.category}`);
       } catch (catErr) {
         // Non-fatal — the PR is already open; category will be missing from DynamoDB
         // but the site schema was already committed as part of the PR.
