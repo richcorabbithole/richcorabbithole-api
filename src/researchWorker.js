@@ -115,6 +115,13 @@ Be thorough but concise. Focus on accuracy and include URLs for all cited source
       // and must not trust any field unconditionally (guards against replayed/crafted messages).
       if (SLUG_RE.test(providedCategory) && providedCategory.length <= 32) {
         resolvedCategory = providedCategory;
+        // Still check whether this is a new category so publishWorker updates
+        // config.ts, categoryConfig.ts, global.css, and DynamoDB appropriately.
+        const knownCategories = await getKnownCategories();
+        if (!knownCategories.includes(resolvedCategory)) {
+          isNewCategory = true;
+          newCategoryColor = "#7a7a7a"; // default muted color for user-supplied new categories
+        }
       } else {
         console.warn(`Provided category "${providedCategory}" failed validation, falling back to auto-categorization`);
         // resolvedCategory stays unset — falls through to the Claude categorization block below
