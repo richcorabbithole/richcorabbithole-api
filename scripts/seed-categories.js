@@ -52,7 +52,7 @@ async function main() {
 
   if (profile) process.env.AWS_PROFILE = profile;
 
-  const tableName = table || `richcorabbithole-${stage}`;
+  const tableName = table || `richcorabbithole-tasks-${stage}`;
 
   console.log(`Table: ${tableName}`);
   console.log(`Dry run: ${dryRun}`);

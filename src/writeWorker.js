@@ -22,6 +22,7 @@ const { PutObjectCommand, CopyObjectCommand } = require("@aws-sdk/client-s3");
 const { getDocClient, getS3Client, getS3Object, getAnthropicApiKey, updateTaskStatus, parseSqsMessage, sendSqsMessage } = require("./lib/shared-utils");
 
 function buildFirstDraftPrompt(category) {
+  const today = new Date().toISOString().slice(0, 10);
   return `You are a blog writer for richcorabbithole — a blog about going deep on random topics (hyperfixations).
 
 Your job is to transform research notes into a blog post that satisfies intellectual curiosity. This is not marketing content or persuasive writing — it's exploration and discovery shared with curious readers.
@@ -29,7 +30,7 @@ Your job is to transform research notes into a blog post that satisfies intellec
 The post MUST start with valid YAML frontmatter fenced by --- lines. The frontmatter MUST contain exactly these fields:
 - title: An accurate, descriptive title that reflects what you actually learned (string, in quotes)
 - description: A 1-2 sentence summary of what the post explores (string, in quotes)
-- publishDate: Today's date in YYYY-MM-DD format (string, in quotes)
+- publishDate: "${today}" (string, in quotes — use this exact date, do not change it)
 - hyperfixation: "${category}" (string, in quotes — do not change this value)
 - slug: A short 2-4 word URL slug derived from the title (lowercase, hyphenated, max 30 chars, e.g. "roman-aqueducts", "quantum-sleep", "deep-sea-vents"). More memorable than the full title — omit filler words.
 - researchDepth: How deep the research goes, 1-5 integer
