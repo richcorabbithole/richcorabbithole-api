@@ -21,7 +21,8 @@ const { GetCommand } = require("@aws-sdk/lib-dynamodb");
 const { PutObjectCommand, CopyObjectCommand } = require("@aws-sdk/client-s3");
 const { getDocClient, getS3Client, getS3Object, getAnthropicApiKey, updateTaskStatus, parseSqsMessage, sendSqsMessage } = require("./lib/shared-utils");
 
-const FIRST_DRAFT_SYSTEM_PROMPT = `You are a blog writer for richcorabbithole — a blog about going deep on random topics (hyperfixations).
+function buildFirstDraftPrompt(category) {
+  return `You are a blog writer for richcorabbithole — a blog about going deep on random topics (hyperfixations).
 
 Your job is to transform research notes into a blog post that satisfies intellectual curiosity. This is not marketing content or persuasive writing — it's exploration and discovery shared with curious readers.
 
@@ -29,10 +30,10 @@ The post MUST start with valid YAML frontmatter fenced by --- lines. The frontma
 - title: An accurate, descriptive title that reflects what you actually learned (string, in quotes)
 - description: A 1-2 sentence summary of what the post explores (string, in quotes)
 - publishDate: Today's date in YYYY-MM-DD format (string, in quotes)
-- hyperfixation: One of: tech, science, history, gaming, maker, other (string, in quotes)
+- hyperfixation: "${category}" (string, in quotes — do not change this value)
+- slug: A short 2-4 word URL slug derived from the title (lowercase, hyphenated, max 30 chars, e.g. "roman-aqueducts", "quantum-sleep", "deep-sea-vents"). More memorable than the full title — omit filler words.
 - researchDepth: How deep the research goes, 1-5 integer
 - tags: Array of 3-6 relevant tags (array of strings)
-- draft: true (boolean, the post starts as a draft)
 - sources: Array of source URLs from the research (array of strings)
 
 After the frontmatter, write the blog post in markdown with:
@@ -53,8 +54,10 @@ Think: engaged curiosity, not academic distance or marketing hype. Trust your re
 
 Do NOT include any text before the opening --- or after the post content.
 Output ONLY the complete markdown file with frontmatter.`;
+}
 
-const REVISION_SYSTEM_PROMPT = `You are a blog writer for richcorabbithole — a blog about going deep on random topics (hyperfixations).
+function buildRevisionPrompt(category) {
+  return `You are a blog writer for richcorabbithole — a blog about going deep on random topics (hyperfixations).
 
 You are revising an existing draft based on editorial feedback. You will receive:
 1. The original research notes
@@ -67,16 +70,17 @@ The post MUST start with valid YAML frontmatter fenced by --- lines. The frontma
 - title: An accurate, descriptive title (string, in quotes)
 - description: A 1-2 sentence summary of what the post explores (string, in quotes)
 - publishDate: The original publish date (string, in quotes, YYYY-MM-DD format)
-- hyperfixation: One of: tech, science, history, gaming, maker, other (string, in quotes)
+- hyperfixation: "${category}" (string, in quotes — do not change this value)
+- slug: A short 2-4 word URL slug derived from the title (lowercase, hyphenated, max 30 chars, e.g. "roman-aqueducts", "quantum-sleep", "deep-sea-vents"). Keep from existing draft unless the title changed significantly.
 - researchDepth: How deep the research goes, 1-5 integer
 - tags: Array of 3-6 relevant tags (array of strings)
-- draft: true (boolean)
 - sources: Array of source URLs from the research (array of strings)
 
 Keep personal framing ("I"), show your thinking process, use specific details. Trust your reader's intelligence.
 
 Do NOT include any text before the opening --- or after the post content.
 Output ONLY the complete revised markdown file with frontmatter.`;
+}
 
 module.exports.handler = async (event) => {
   const msg = parseSqsMessage(event);
@@ -133,13 +137,16 @@ module.exports.handler = async (event) => {
     // Fetch the research from S3
     const researchContent = await getS3Object(task.s3Key);
 
+    // Resolve the category — set by researchWorker after categorization, falls back to "other"
+    const resolvedCategory = task.category || "other";
+
     // Build the Claude prompt based on flow
     let systemPrompt;
     let userMessage;
     const s3Client = getS3Client();
 
     if (isRevision) {
-      systemPrompt = REVISION_SYSTEM_PROMPT;
+      systemPrompt = buildRevisionPrompt(resolvedCategory);
 
       // Fetch current draft
       const draftKey = task.draftS3Key || `drafts/${taskId}.md`;
@@ -160,7 +167,7 @@ module.exports.handler = async (event) => {
         })
       );
     } else {
-      systemPrompt = FIRST_DRAFT_SYSTEM_PROMPT;
+      systemPrompt = buildFirstDraftPrompt(resolvedCategory);
       userMessage = `Write a blog post based on this research:\n\n${researchContent}`;
     }
 
