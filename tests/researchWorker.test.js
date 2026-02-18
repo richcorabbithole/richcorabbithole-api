@@ -87,7 +87,8 @@ describe("researchWorker handler", () => {
       const result = await handler(sqsEvent({ taskId: "t1", topic: "test" }));
 
       assert.strictEqual(result.status, "researched");
-      assert.strictEqual(mockCreate.mock.calls.length, 1);
+      // Two Claude calls: research (index 0) + categorization (index 1)
+      assert.strictEqual(mockCreate.mock.calls.length, 2);
     });
   });
 
@@ -100,14 +101,17 @@ describe("researchWorker handler", () => {
       const callNames = mockSend.mock.calls.map(c => c.arguments[0].name);
 
       // Expected order: GetCommand (idempotency), UpdateCommand (researching),
-      // GetSecretValueCommand, PutObjectCommand (S3), UpdateCommand (researched),
+      // GetSecretValueCommand (API key — cached thereafter), PutObjectCommand (S3 write),
+      // GetCommand (getKnownCategories), UpdateCommand (researched),
       // SendMessageCommand (enqueue write job)
+      // Note: no second GetSecretValueCommand — cachedApiKey is reused for the categorization call.
       assert.strictEqual(callNames[0], "GetCommand");
       assert.strictEqual(callNames[1], "UpdateCommand");
       assert.strictEqual(callNames[2], "GetSecretValueCommand");
       assert.strictEqual(callNames[3], "PutObjectCommand");
-      assert.strictEqual(callNames[4], "UpdateCommand");
-      assert.strictEqual(callNames[5], "SendMessageCommand");
+      assert.strictEqual(callNames[4], "GetCommand");
+      assert.strictEqual(callNames[5], "UpdateCommand");
+      assert.strictEqual(callNames[6], "SendMessageCommand");
     });
 
     it("writes S3 object with correct key pattern", async () => {
