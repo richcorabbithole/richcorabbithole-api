@@ -364,9 +364,10 @@ async function publishCommand(publishTopic) {
     process.exit(1);
   }
 
-  const VALID_CATEGORIES = ["tech", "science", "history", "gaming", "maker", "other"];
-  if (category && !VALID_CATEGORIES.includes(category)) {
-    console.error(`Error: Invalid category "${category}". Must be one of: ${VALID_CATEGORIES.join(", ")}`);
+  // Categories are open-ended — the pipeline can invent new ones automatically.
+  // When explicitly provided, validate it is a well-formed lowercase slug.
+  if (category && !/^[a-z][a-z0-9-]*$/.test(category)) {
+    console.error(`Error: Invalid category "${category}". Must be a lowercase word or hyphenated slug (e.g. "tech", "true-crime").`);
     process.exit(1);
   }
 

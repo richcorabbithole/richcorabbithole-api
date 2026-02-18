@@ -42,11 +42,12 @@ module.exports.handler = async (event) => {
       };
     }
 
-    const VALID_CATEGORIES = ["tech", "science", "history", "gaming", "maker", "other"];
-    if (category !== undefined && !VALID_CATEGORIES.includes(category)) {
+    // Categories are open-ended — the pipeline can invent new ones.
+    // Validate only that the value is a well-formed lowercase slug.
+    if (category !== undefined && !/^[a-z][a-z0-9-]*$/.test(category)) {
       return {
         statusCode: 400,
-        body: JSON.stringify({ error: `Invalid category. Must be one of: ${VALID_CATEGORIES.join(", ")}` })
+        body: JSON.stringify({ error: "Invalid category. Must be a lowercase word or hyphenated slug (e.g. 'tech', 'true-crime')." })
       };
     }
 

@@ -9,7 +9,7 @@
  */
 
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
-const { DynamoDBDocumentClient, UpdateCommand } = require("@aws-sdk/lib-dynamodb");
+const { DynamoDBDocumentClient, UpdateCommand, GetCommand } = require("@aws-sdk/lib-dynamodb");
 const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { SQSClient, SendMessageCommand } = require("@aws-sdk/client-sqs");
 const { SecretsManagerClient, GetSecretValueCommand } = require("@aws-sdk/client-secrets-manager");
@@ -53,7 +53,29 @@ async function getGitHubAppCredentials() {
     new GetSecretValueCommand({ SecretId: "richcorabbithole/github-app" })
   );
 
-  cachedGitHubApp = JSON.parse(response.SecretString);
+  let secretString = response.SecretString;
+  // AWS Secrets Manager sometimes stores PEM private keys with literal newlines,
+  // which makes JSON.parse fail with "Bad control character". Escape them first,
+  // then restore real newlines in the key value after parsing.
+  let parsed;
+  try {
+    parsed = JSON.parse(secretString);
+  } catch {
+    // Escape literal newlines only within JSON string values by replacing bare newlines
+    // that fall inside a quoted context. Simple heuristic: escape all \n and \r, then
+    // restore structural whitespace by re-parsing with relaxed logic isn't straightforward,
+    // so instead we use a targeted regex to escape newlines inside the privateKey field value.
+    secretString = secretString.replace(
+      /("privateKey"\s*:\s*")([\s\S]*?)(")/,
+      (_, prefix, key, suffix) => prefix + key.replace(/\n/g, "\\n").replace(/\r/g, "\\r") + suffix
+    );
+    parsed = JSON.parse(secretString);
+  }
+  // Ensure the private key has real newlines for crypto.sign (in case it was stored with \n literals)
+  if (parsed.privateKey) {
+    parsed.privateKey = parsed.privateKey.replace(/\\n/g, "\n");
+  }
+  cachedGitHubApp = parsed;
   return cachedGitHubApp;
 }
 
@@ -269,6 +291,58 @@ async function sendSqsMessage(queueUrl, body) {
   );
 }
 
+// Config item key for the known categories list stored in DynamoDB.
+// The item lives in the same table as tasks, keyed on taskId = "config:categories".
+const CATEGORIES_CONFIG_KEY = "config:categories";
+// Default seed list — used as fallback if the config item doesn't exist yet.
+const DEFAULT_CATEGORIES = ["tech", "science", "history", "gaming", "maker", "other"];
+
+/**
+ * Fetch the known hyperfixation categories from DynamoDB.
+ * Falls back to DEFAULT_CATEGORIES if the config item is missing.
+ *
+ * @returns {Promise<string[]>}
+ */
+async function getKnownCategories() {
+  const result = await docClient.send(
+    new GetCommand({
+      TableName: process.env.TABLE_NAME,
+      Key: { taskId: CATEGORIES_CONFIG_KEY }
+    })
+  );
+  if (result.Item && Array.isArray(result.Item.values) && result.Item.values.length > 0) {
+    return result.Item.values;
+  }
+  return [...DEFAULT_CATEGORIES];
+}
+
+/**
+ * Append a new category to the known categories list in DynamoDB.
+ * Uses list_append so concurrent writes are safe (last writer wins on the append).
+ *
+ * @param {string} category - lowercase slug to add (e.g. "space", "true-crime")
+ * @returns {Promise<void>}
+ */
+async function addKnownCategory(category) {
+  // Use UpdateItem with list_append + if_not_exists to handle the item not existing yet.
+  await docClient.send(
+    new UpdateCommand({
+      TableName: process.env.TABLE_NAME,
+      Key: { taskId: CATEGORIES_CONFIG_KEY },
+      UpdateExpression: "SET #vals = list_append(if_not_exists(#vals, :empty), :newcat), #status = :status",
+      ExpressionAttributeNames: {
+        "#vals": "values",
+        "#status": "status"
+      },
+      ExpressionAttributeValues: {
+        ":newcat": [category],
+        ":empty": [],
+        ":status": "config"
+      }
+    })
+  );
+}
+
 module.exports = {
   getDocClient: () => docClient,
   getS3Client: () => s3Client,
@@ -279,5 +353,7 @@ module.exports = {
   updateTaskStatus,
   getS3Object,
   parseSqsMessage,
-  sendSqsMessage
+  sendSqsMessage,
+  getKnownCategories,
+  addKnownCategory
 };
