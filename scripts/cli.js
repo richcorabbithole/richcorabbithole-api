@@ -8,12 +8,16 @@
  *   research --topic <topic>  — Trigger a research task via the API (SigV4-signed)
  *   draft <taskId>            — Enqueue a write job for an already-researched task
  *   read-draft <taskId>       — Display the current draft for a task
+ *   approve <taskId>          — Mark a published task as approved training data
+ *   reject <taskId>           — Mark a published task as rejected (bad data)
  *
  * Usage:
  *   node scripts/cli.js publish "quantum computing" --category tech --stage dev --profile richcorabbithole
  *   node scripts/cli.js research --topic "serverless architecture" --stage dev --profile richcorabbithole
  *   node scripts/cli.js draft <taskId> --stage dev --profile richcorabbithole
  *   node scripts/cli.js read-draft <taskId> --stage dev --profile richcorabbithole
+ *   node scripts/cli.js approve <taskId> --stage dev --profile richcorabbithole
+ *   node scripts/cli.js reject <taskId> --stage dev --profile richcorabbithole
  *
  * Environment Variables:
  *   AWS_PROFILE=richcorabbithole (alternative to --profile flag)
@@ -21,7 +25,7 @@
 
 const { SQSClient, SendMessageCommand, GetQueueUrlCommand } = require("@aws-sdk/client-sqs");
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
-const { DynamoDBDocumentClient, GetCommand } = require("@aws-sdk/lib-dynamodb");
+const { DynamoDBDocumentClient, GetCommand, UpdateCommand } = require("@aws-sdk/lib-dynamodb");
 const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { fromIni } = require("@aws-sdk/credential-provider-ini");
 
@@ -555,8 +559,67 @@ async function publishCommand(publishTopic) {
   }
 }
 
+/**
+ * approve <taskId> / reject <taskId> — Set the approval field on a task record.
+ *
+ * @param {string} taskId
+ * @param {"approved"|"rejected"} decision
+ */
+async function setApprovalCommand(taskId, decision) {
+  if (!taskId) {
+    console.error(`Usage: node scripts/cli.js ${decision} <taskId> [--stage dev] [--profile name]`);
+    process.exit(1);
+  }
+
+  const clientConfig = makeClientConfig();
+  const dynamoClient = new DynamoDBClient(clientConfig);
+  const docClient = DynamoDBDocumentClient.from(dynamoClient);
+
+  // Verify the task exists
+  const taskResult = await docClient.send(
+    new GetCommand({ TableName: TABLE_NAME, Key: { taskId } })
+  );
+
+  if (!taskResult.Item) {
+    console.error(`❌ Task not found: ${taskId}`);
+    process.exit(1);
+    return;
+  }
+
+  const task = taskResult.Item;
+  const timestampField = decision === "approved" ? "approvedAt" : "rejectedAt";
+
+  await docClient.send(
+    new UpdateCommand({
+      TableName: TABLE_NAME,
+      Key: { taskId },
+      UpdateExpression: "SET #approval = :decision, #ts = :now",
+      ExpressionAttributeNames: {
+        "#approval": "approval",
+        "#ts": timestampField,
+      },
+      ExpressionAttributeValues: {
+        ":decision": decision,
+        ":now": new Date().toISOString(),
+      },
+    })
+  );
+
+  const symbol = decision === "approved" ? "✅" : "❌";
+  console.log(`${symbol} Task ${decision}: ${taskId}`);
+  console.log(`   Topic:  ${task.topic || "(unknown)"}`);
+  console.log(`   Status: ${task.status}`);
+  if (task.prUrl) console.log(`   PR:     ${task.prUrl}`);
+}
+
 // --- Main ---
 
+/**
+ * CLI entry point. Parses the subcommand from argv and dispatches to the
+ * appropriate command function (publish, research, draft, read-draft).
+ *
+ * @returns {Promise<void>}
+ */
 async function main() {
   if (!command) {
     console.error("Usage: node scripts/cli.js <command> [options]");
@@ -565,6 +628,8 @@ async function main() {
     console.error("  research --topic <topic>  Trigger a research task via the API");
     console.error("  draft <taskId>            Enqueue a write job for an already-researched task");
     console.error("  read-draft <taskId>       Display the current draft for a task");
+    console.error("  approve <taskId>          Mark a task as approved training data");
+    console.error("  reject <taskId>           Mark a task as rejected (bad data)");
     console.error("\nFlags:");
     console.error("  --category <cat>    Blog category: tech, science, history, gaming, maker, other");
     console.error("  --stage <stage>     Target stage: dev or prod (default: dev)");
@@ -586,9 +651,15 @@ async function main() {
       case "read-draft":
         await readDraftCommand(positionalArgs[0]);
         break;
+      case "approve":
+        await setApprovalCommand(positionalArgs[0], "approved");
+        break;
+      case "reject":
+        await setApprovalCommand(positionalArgs[0], "rejected");
+        break;
       default:
         console.error(`Unknown command: ${command}`);
-        console.error("\nAvailable commands: publish, research, draft, read-draft");
+        console.error("\nAvailable commands: publish, research, draft, read-draft, approve, reject");
         process.exit(1);
     }
   } catch (error) {
@@ -610,3 +681,8 @@ async function main() {
 }
 
 main();
+
+// Exported for testing only — not used when the script runs as a CLI entrypoint.
+if (typeof module !== "undefined") {
+  module.exports = { setApprovalCommand };
+}

@@ -25,6 +25,12 @@ const secretsClient = new SecretsManagerClient({});
 
 let cachedApiKey = null;
 
+/**
+ * Retrieve the Anthropic API key from AWS Secrets Manager.
+ * Result is cached for the lifetime of the Lambda container.
+ *
+ * @returns {Promise<string>} The Anthropic API key string.
+ */
 async function getAnthropicApiKey() {
   if (cachedApiKey) return cachedApiKey;
 
@@ -214,6 +220,14 @@ async function githubApiRequest(method, path, token, body = null) {
   });
 }
 
+/**
+ * Update a pipeline task's status and optional metadata fields in DynamoDB.
+ *
+ * @param {string} taskId - The UUID of the task to update.
+ * @param {string} status - New status value (e.g. "researching", "published").
+ * @param {object} [extraFields={}] - Additional attributes to set on the item.
+ * @returns {Promise<void>}
+ */
 async function updateTaskStatus(taskId, status, extraFields = {}) {
   const expressionParts = ["#status = :status", "updatedAt = :now"];
   const attributeNames = { "#status": "status" };
@@ -241,6 +255,12 @@ async function updateTaskStatus(taskId, status, extraFields = {}) {
   );
 }
 
+/**
+ * Fetch an object from the pipeline S3 bucket and return its body as a string.
+ *
+ * @param {string} key - The S3 object key (e.g. "research/uuid.md").
+ * @returns {Promise<string>} The object body decoded as UTF-8 text.
+ */
 async function getS3Object(key) {
   const response = await s3Client.send(
     new GetObjectCommand({
@@ -258,6 +278,14 @@ async function getS3Object(key) {
  * @returns {{ taskId: string, body: object } | null}
  *   Returns null if Records is empty/missing (silently consumed).
  *   Throws on malformed JSON or missing taskId (retried then DLQ'd).
+ */
+/**
+ * Parse and validate the first record from an SQS Lambda event.
+ * Returns null for empty events (message silently consumed).
+ * Throws on malformed JSON or missing taskId (triggers SQS retry).
+ *
+ * @param {object} event - The Lambda SQS event object.
+ * @returns {{ taskId: string, body: object } | null}
  */
 function parseSqsMessage(event) {
   if (!event.Records || event.Records.length === 0) {
@@ -282,6 +310,13 @@ function parseSqsMessage(event) {
   return { taskId: parsed.taskId, body: parsed };
 }
 
+/**
+ * Send a JSON message to an SQS queue.
+ *
+ * @param {string} queueUrl - The full SQS queue URL.
+ * @param {object} body - JSON-serializable message payload.
+ * @returns {Promise<void>}
+ */
 async function sendSqsMessage(queueUrl, body) {
   await sqsClient.send(
     new SendMessageCommand({
