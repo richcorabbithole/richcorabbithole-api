@@ -36,7 +36,7 @@ module.exports.handler = async (event) => {
       };
     }
 
-    const { topic, category } = body;
+    const { topic, category, articleType } = body;
 
     if (!topic || typeof topic !== "string") {
       return {
@@ -55,6 +55,16 @@ module.exports.handler = async (event) => {
     // Categories are open-ended — the pipeline can invent new ones.
     // Validate that the value is a well-formed lowercase slug and within the same
     // 32-char length cap enforced on model output in researchWorker.
+    const VALID_ARTICLE_TYPES = ["knowledge", "best-of", "how-to", "masterclass"];
+    if (articleType !== undefined) {
+      if (!VALID_ARTICLE_TYPES.includes(articleType)) {
+        return {
+          statusCode: 400,
+          body: JSON.stringify({ error: `Invalid articleType. Must be one of: ${VALID_ARTICLE_TYPES.join(", ")}.` })
+        };
+      }
+    }
+
     if (category !== undefined) {
       if (!/^[a-z][a-z0-9-]*$/.test(category)) {
         return {
@@ -82,6 +92,7 @@ module.exports.handler = async (event) => {
       updatedAt: now
     };
     if (category) item.category = category;
+    if (articleType) item.articleType = articleType;
 
     try {
       await getDocClient().send(
@@ -98,7 +109,7 @@ module.exports.handler = async (event) => {
 
     // Place on queue for Research worker to pick up
     try {
-      await sendSqsMessage(process.env.RESEARCH_QUEUE_URL, { taskId, topic, category });
+      await sendSqsMessage(process.env.RESEARCH_QUEUE_URL, { taskId, topic, category, articleType });
     } catch (err) {
       const errMsg = 'Failed to place message on queue';
       console.error(errMsg, err);
