@@ -208,6 +208,7 @@ Be thorough but concise. Focus on accuracy and include URLs for all cited source
       const knownCategories = await getKnownCategories();
 
       const categoryListText = knownCategories
+        .filter(c => c.slug !== "other")
         .map(c => `- ${c.slug}: ${c.description}`)
         .join("\n");
 

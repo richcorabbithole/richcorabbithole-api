@@ -13,6 +13,7 @@ jobs:
   deploy:
     name: Deploy to prod
     runs-on: ubuntu-latest
+    if: github.event.release.author.login == 'richcompton1705'
     steps:
       - uses: actions/checkout@v4
         with:
