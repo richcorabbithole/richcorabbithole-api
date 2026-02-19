@@ -111,7 +111,7 @@ tests/
     mock-aws.js         # AWS SDK mock infrastructure
     worker-test-utils.js # Shared worker test behaviors
 scripts/
-  cli.js                # Unified CLI (publish, research, draft, read-draft)
+  cli.js                # Unified CLI (publish, research, draft, read-draft, approve, reject)
 .github/workflows/
   test.yml              # Run tests on PRs + EoL check
   deploy-dev.yml        # Deploy on merge to development
@@ -185,6 +185,20 @@ npm run draft -- <taskId> --profile richcorabbithole
 ```bash
 npm run read-draft -- <taskId> --profile richcorabbithole
 ```
+
+**approve** — Mark a published task as approved training data:
+
+```bash
+node scripts/cli.js approve <taskId> --stage prod --profile richcorabbithole
+```
+
+**reject** — Mark a published task as rejected (bad data):
+
+```bash
+node scripts/cli.js reject <taskId> --stage prod --profile richcorabbithole
+```
+
+Both commands set an `approval` field (`"approved"` or `"rejected"`) and a timestamp (`approvedAt` / `rejectedAt`) on the DynamoDB task record. Tasks with no `approval` field have not been reviewed yet. This data is used for training data curation — scan for `approval = "approved"` to collect positive examples.
 
 ### Flags
 
