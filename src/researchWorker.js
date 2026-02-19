@@ -24,7 +24,7 @@ module.exports.handler = async (event) => {
   if (!msg) return;
 
   const { taskId, body } = msg;
-  const { topic, category: providedCategory } = body;
+  const { topic, category: providedCategory, articleType: providedArticleType } = body;
 
   if (!topic) {
     // Has taskId but no topic — mark the existing DynamoDB record as failed, then delete message
@@ -61,6 +61,59 @@ module.exports.handler = async (event) => {
     const anthropicSDK = require("@anthropic-ai/sdk");
     const anthropicInstance = new anthropicSDK({ apiKey });
 
+    // --- Article type resolution ---
+    // If not supplied by the caller, infer it from the topic with a cheap classification call.
+    const VALID_ARTICLE_TYPES = ["knowledge", "best-of", "how-to", "masterclass"];
+    let resolvedArticleType = providedArticleType;
+    let articleTypeInferred = false;
+
+    if (!resolvedArticleType) {
+      const typeMessage = await anthropicInstance.messages.create({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 64,
+        system: `You classify blog topic requests into one of four article types. Respond with ONLY valid JSON — no markdown, no explanation.
+
+Types:
+- "knowledge": Reader wants to understand a concept (what is X, how does X work, why does X matter)
+- "best-of": Reader wants curation to choose from a crowded space (best tools, top options, what to use)
+- "how-to": Reader wants to accomplish a specific goal (how to do X, steps to achieve Y)
+- "masterclass": Reader wants deep, comprehensive ownership of a topic (complete guide, everything about X)`,
+        messages: [{ role: "user", content: `Classify this topic: ${topic}\n\nRespond with ONLY: { "articleType": "<type>" }` }]
+      });
+
+      const typeTextBlock = typeMessage.content.find(b => b.type === "text");
+      if (typeTextBlock) {
+        try {
+          const parsed = JSON.parse(typeTextBlock.text.trim());
+          if (VALID_ARTICLE_TYPES.includes(parsed.articleType)) {
+            resolvedArticleType = parsed.articleType;
+            articleTypeInferred = true;
+          }
+        } catch {
+          // ignore — falls back to "knowledge" below
+        }
+      }
+
+      if (!resolvedArticleType) {
+        console.warn(`Task ${taskId} article type inference failed, falling back to "knowledge"`);
+        resolvedArticleType = "knowledge";
+        articleTypeInferred = true;
+      }
+
+      console.log(`Task ${taskId} article type inferred: ${resolvedArticleType}`);
+    } else {
+      console.log(`Task ${taskId} article type provided: ${resolvedArticleType}`);
+    }
+
+    // Research focus addendum — adapts the research prompt to gather the right raw material
+    // for each article type before the writer ever sees it.
+    const RESEARCH_FOCUS = {
+      "knowledge": "",
+      "best-of": "\n\nFocus specifically on: identifying the major options in this space, the criteria for evaluating them, their relative tradeoffs, and which options are best suited for different use cases.",
+      "how-to": "\n\nFocus specifically on: the step-by-step process required, prerequisites, common failure points and how to avoid them, and what success concretely looks like.",
+      "masterclass": "\n\nThis will become a comprehensive deep-dive. Cover foundational concepts, intermediate nuance, advanced edge cases, open questions in the field, and practical application. Go deeper than a surface overview — the goal is for the reader to genuinely own this topic after reading."
+    };
+
     const message = await anthropicInstance.messages.create({
       model: "claude-sonnet-4-20250514",
       max_tokens: 4096,
@@ -78,7 +131,7 @@ Be thorough but concise. Focus on accuracy and include URLs for all cited source
       messages: [
         {
           role: "user",
-          content: `Research the following topic thoroughly: ${topic}`
+          content: `Research the following topic thoroughly: ${topic}${RESEARCH_FOCUS[resolvedArticleType]}`
         }
       ]
     });
@@ -236,12 +289,14 @@ ${researchContent.slice(0, 3000)}`;
 
     console.log(`Task ${taskId} category resolved: ${resolvedCategory} (isNew: ${isNewCategory})`);
 
-    // Update task record to researched, persisting category metadata
+    // Update task record to researched, persisting category and article type metadata
     const researchedFields = {
       s3Key,
       researchedAt: new Date().toISOString(),
       category: resolvedCategory,
       isNewCategory,
+      articleType: resolvedArticleType,
+      articleTypeInferred,
     };
     if (newCategoryColor) researchedFields.newCategoryColor = newCategoryColor;
     if (resolvedCategoryDescription) researchedFields.categoryDescription = resolvedCategoryDescription;
@@ -253,8 +308,8 @@ ${researchContent.slice(0, 3000)}`;
       if (!process.env.WRITE_QUEUE_URL) {
         console.error(`WRITE_QUEUE_URL not set — skipping write enqueue for task ${taskId}`);
       } else {
-        await sendSqsMessage(process.env.WRITE_QUEUE_URL, { taskId, category: resolvedCategory });
-        console.log(`Research complete for task ${taskId}: ${s3Key} — write job enqueued (category: ${resolvedCategory})`);
+        await sendSqsMessage(process.env.WRITE_QUEUE_URL, { taskId, category: resolvedCategory, articleType: resolvedArticleType });
+        console.log(`Research complete for task ${taskId}: ${s3Key} — write job enqueued (category: ${resolvedCategory}, articleType: ${resolvedArticleType})`);
       }
     } catch (enqueueErr) {
       console.error(`Research saved but failed to enqueue write job for ${taskId}:`, enqueueErr);

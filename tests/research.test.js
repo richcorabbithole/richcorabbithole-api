@@ -71,6 +71,44 @@ describe("research accept handler", () => {
 
       assert.strictEqual(result.statusCode, 202);
     });
+
+    it("rejects invalid articleType", async () => {
+      const result = await handler({
+        body: JSON.stringify({ topic: "test topic", articleType: "essay" })
+      });
+
+      assert.strictEqual(result.statusCode, 400);
+      const body = JSON.parse(result.body);
+      assert.match(body.error, /articleType/);
+    });
+
+    it("accepts valid articleType values", async () => {
+      for (const type of ["knowledge", "best-of", "how-to", "masterclass"]) {
+        const result = await handler({
+          body: JSON.stringify({ topic: "test topic", articleType: type })
+        });
+        assert.strictEqual(result.statusCode, 202, `Expected 202 for articleType: ${type}`);
+      }
+    });
+
+    it("passes articleType through to SQS message", async () => {
+      await handler({
+        body: JSON.stringify({ topic: "test topic", articleType: "how-to" })
+      });
+
+      const sqsCall = mockSend.mock.calls[1];
+      const messageBody = JSON.parse(sqsCall.arguments[0].params.MessageBody);
+      assert.strictEqual(messageBody.articleType, "how-to");
+    });
+
+    it("passes articleType through to DynamoDB record", async () => {
+      await handler({
+        body: JSON.stringify({ topic: "test topic", articleType: "masterclass" })
+      });
+
+      const putCall = mockSend.mock.calls[0];
+      assert.strictEqual(putCall.arguments[0].params.Item.articleType, "masterclass");
+    });
   });
 
   // --- Happy path ---

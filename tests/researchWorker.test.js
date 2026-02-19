@@ -87,7 +87,15 @@ describe("researchWorker handler", () => {
       const result = await handler(sqsEvent({ taskId: "t1", topic: "test" }));
 
       assert.strictEqual(result.status, "researched");
-      // Two Claude calls: research (index 0) + categorization (index 1)
+      // Three Claude calls: type inference (index 0) + research (index 1) + categorization (index 2)
+      assert.strictEqual(mockCreate.mock.calls.length, 3);
+    });
+
+    it("skips type inference when articleType is provided", async () => {
+      const result = await handler(sqsEvent({ taskId: "t1", topic: "test", articleType: "how-to" }));
+
+      assert.strictEqual(result.status, "researched");
+      // Two Claude calls: research (index 0) + categorization (index 1) — no inference needed
       assert.strictEqual(mockCreate.mock.calls.length, 2);
     });
   });
@@ -104,7 +112,9 @@ describe("researchWorker handler", () => {
       // GetSecretValueCommand (API key — cached thereafter), PutObjectCommand (S3 write),
       // GetCommand (getKnownCategories), UpdateCommand (researched),
       // SendMessageCommand (enqueue write job)
-      // Note: no second GetSecretValueCommand — cachedApiKey is reused for the categorization call.
+      // Note: type inference and categorization Claude calls fire between GetSecretValueCommand
+      // and PutObjectCommand / GetCommand respectively, but add no AWS SDK calls of their own.
+      // cachedApiKey is reused for all three Claude calls — only one GetSecretValueCommand fires.
       assert.strictEqual(callNames[0], "GetCommand");
       assert.strictEqual(callNames[1], "UpdateCommand");
       assert.strictEqual(callNames[2], "GetSecretValueCommand");
