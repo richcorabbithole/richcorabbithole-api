@@ -21,8 +21,34 @@ const { GetCommand } = require("@aws-sdk/lib-dynamodb");
 const { PutObjectCommand, CopyObjectCommand } = require("@aws-sdk/client-s3");
 const { getDocClient, getS3Client, getS3Object, getAnthropicApiKey, updateTaskStatus, parseSqsMessage, sendSqsMessage } = require("./lib/shared-utils");
 
-function buildFirstDraftPrompt(category) {
+const ARTICLE_TYPE_STRUCTURE = {
+  "knowledge": `- **Structure**: Conceptual sections that build understanding naturally — foundational concepts first, then nuance, then implications. Use ## headings that describe what each section explains, not marketing formulas.
+- **Opening**: Start with the concept itself. Get to the interesting part immediately.
+- **Conclusion**: Reflect on what you learned and what questions remain open.
+- **Length**: 800–1500 words of body content.`,
+
+  "best-of": `- **Structure**: (1) Brief intro establishing why choice is hard or the space is crowded, (2) The criteria you'd use to evaluate options, (3) Each notable option with honest tradeoffs — what it's good at, where it falls short, who it's for, (4) A clear recommendation with reasoning. Don't hedge — make the call.
+- **Opening**: Establish the choice problem immediately. Don't summarize what you're about to do — just start evaluating.
+- **Tone**: Opinionated but fair. Honest about tradeoffs. No option is perfect; say so.
+- **Length**: 1000–1800 words of body content.`,
+
+  "how-to": `- **Structure**: (1) What you'll accomplish and any prerequisites, (2) Numbered steps — specific, actionable, in order, (3) What can go wrong and how to handle it, (4) How to know it worked.
+- **Opening**: State what the reader will be able to do after following this. Get to step 1 quickly.
+- **Steps**: Be concrete. Include actual commands, values, or decisions where relevant. Don't skip steps that seem obvious.
+- **Tone**: Direct and practical. Save the exploration for the knowledge posts — here the reader wants to get something done.
+- **Length**: 800–1500 words of body content.`,
+
+  "masterclass": `- **Structure**: Build from foundations up. Start with what someone needs to know first, then intermediate concepts, then advanced nuance and edge cases. Use named ## sections that could stand alone as reference points. Include a "further reading" or "where to go next" section at the end.
+- **Opening**: Frame the scope — what this covers and why it matters to go deep on it.
+- **Depth**: Go further than a knowledge post. Cover the mechanisms, the history, the controversies, the open questions, and the practical implications. This is a reference, not a scan.
+- **Tone**: Still conversational, but willing to slow down and be precise. The reader is investing time — reward that.
+- **Length**: 2000–4000 words of body content.`
+};
+
+function buildFirstDraftPrompt(category, articleType = "knowledge") {
   const today = new Date().toISOString().slice(0, 10);
+  const structure = ARTICLE_TYPE_STRUCTURE[articleType] || ARTICLE_TYPE_STRUCTURE["knowledge"];
+
   return `You are a blog writer for richcorabbithole — a blog about going deep on random topics (hyperfixations).
 
 Your job is to transform research notes into a blog post that satisfies intellectual curiosity. This is not marketing content or persuasive writing — it's exploration and discovery shared with curious readers.
@@ -32,32 +58,32 @@ The post MUST start with valid YAML frontmatter fenced by --- lines. The frontma
 - description: A 1-2 sentence summary of what the post explores (string, in quotes)
 - publishDate: "${today}" (string, in quotes — use this exact date, do not change it)
 - hyperfixation: "${category}" (string, in quotes — do not change this value)
+- articleType: "${articleType}" (string, in quotes — do not change this value)
 - slug: A short 2-4 word URL slug derived from the title (lowercase, hyphenated, max 30 chars, e.g. "roman-aqueducts", "quantum-sleep", "deep-sea-vents"). More memorable than the full title — omit filler words.
 - researchDepth: How deep the research goes, 1-5 integer
 - tags: Array of 3-6 relevant tags (array of strings)
 - sources: Array of source URLs from the research (array of strings)
 
-After the frontmatter, write the blog post in markdown with:
-- **Conversational but substantive**: Like telling a friend about something interesting you learned over coffee. Natural, engaged, but not breathless or clinical.
-- **Grounded in research**: Everything you write should come from the research notes. Do NOT invent scenarios, anecdotes, or personal experiences. If you want to frame something, use the actual research as the hook.
-- **Personal voice for reactions, not stories**: Use "I" for genuine reactions to the research ("This surprised me", "I wasn't expecting this"), but never invent fictional situations ("my friend told me", "I once knew someone").
+This post is a **${articleType}** article. Structure and write it accordingly:
+${structure}
+
+Across all article types:
+- **Conversational but substantive**: Like telling a friend about something interesting you learned. Natural, engaged, but not breathless or clinical.
+- **Grounded in research**: Everything you write should come from the research notes. Do NOT invent scenarios, anecdotes, or personal experiences.
+- **Personal voice for reactions, not stories**: Use "I" for genuine reactions to the research ("This surprised me", "I wasn't expecting this"), but never invent fictional situations.
 - **Show your thinking**: Include the process of discovery, not just polished conclusions. Dead ends, uncertainties, and questions are valuable.
-- **Specific over generic**: Actual examples, real numbers, concrete details from the research. Avoid vague gestures like "research shows" without saying which research.
-- **Natural section headings** (## level) that describe what they contain, not marketing formulas
-- **Balanced tone**: Curious and interested, but not overselling. If something is genuinely surprising, say so. If it's incremental, say that too.
-- **Opening**: Start with the topic itself, not "rabbit hole" metaphors or origin stories. Get to the interesting part immediately.
-- A natural conclusion that reflects on what you learned or what questions remain
-- 800-1500 words of body content
+- **Specific over generic**: Actual examples, real numbers, concrete details from the research.
+- **Balanced tone**: Curious and interested, but not overselling.
 
-CRITICAL: Only write about what's actually in the research. No fictional anecdotes, invented friends, or made-up scenarios. The blog name is "richcorabbithole" but you don't need to say "rabbit hole" in every post.
-
-Think: engaged curiosity, not academic distance or marketing hype. Trust your reader to find the material interesting without overselling it.
+CRITICAL: Only write about what's actually in the research. No fictional anecdotes, invented friends, or made-up scenarios.
 
 Do NOT include any text before the opening --- or after the post content.
 Output ONLY the complete markdown file with frontmatter.`;
 }
 
-function buildRevisionPrompt(category) {
+function buildRevisionPrompt(category, articleType = "knowledge") {
+  const structure = ARTICLE_TYPE_STRUCTURE[articleType] || ARTICLE_TYPE_STRUCTURE["knowledge"];
+
   return `You are a blog writer for richcorabbithole — a blog about going deep on random topics (hyperfixations).
 
 You are revising an existing draft based on editorial feedback. You will receive:
@@ -72,10 +98,14 @@ The post MUST start with valid YAML frontmatter fenced by --- lines. The frontma
 - description: A 1-2 sentence summary of what the post explores (string, in quotes)
 - publishDate: The original publish date (string, in quotes, YYYY-MM-DD format)
 - hyperfixation: "${category}" (string, in quotes — do not change this value)
+- articleType: "${articleType}" (string, in quotes — do not change this value)
 - slug: A short 2-4 word URL slug derived from the title (lowercase, hyphenated, max 30 chars, e.g. "roman-aqueducts", "quantum-sleep", "deep-sea-vents"). Keep from existing draft unless the title changed significantly.
 - researchDepth: How deep the research goes, 1-5 integer
 - tags: Array of 3-6 relevant tags (array of strings)
 - sources: Array of source URLs from the research (array of strings)
+
+This post is a **${articleType}** article — maintain its structural conventions during revision:
+${structure}
 
 Keep personal framing ("I"), show your thinking process, use specific details. Trust your reader's intelligence.
 
@@ -138,8 +168,9 @@ module.exports.handler = async (event) => {
     // Fetch the research from S3
     const researchContent = await getS3Object(task.s3Key);
 
-    // Resolve the category — set by researchWorker after categorization, falls back to "other"
+    // Resolve the category and article type — both set by researchWorker, fall back to safe defaults
     const resolvedCategory = task.category || "other";
+    const resolvedArticleType = task.articleType || "knowledge";
 
     // Build the Claude prompt based on flow
     let systemPrompt;
@@ -147,7 +178,7 @@ module.exports.handler = async (event) => {
     const s3Client = getS3Client();
 
     if (isRevision) {
-      systemPrompt = buildRevisionPrompt(resolvedCategory);
+      systemPrompt = buildRevisionPrompt(resolvedCategory, resolvedArticleType);
 
       // Fetch current draft
       const draftKey = task.draftS3Key || `drafts/${taskId}.md`;
@@ -168,7 +199,7 @@ module.exports.handler = async (event) => {
         })
       );
     } else {
-      systemPrompt = buildFirstDraftPrompt(resolvedCategory);
+      systemPrompt = buildFirstDraftPrompt(resolvedCategory, resolvedArticleType);
       userMessage = `Write a blog post based on this research:\n\n${researchContent}`;
     }
 
