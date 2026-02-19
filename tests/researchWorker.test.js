@@ -98,6 +98,25 @@ describe("researchWorker handler", () => {
       // Two Claude calls: research (index 0) + categorization (index 1) — no inference needed
       assert.strictEqual(mockCreate.mock.calls.length, 2);
     });
+
+    it("falls back to inference when provided articleType is invalid", async () => {
+      const result = await handler(sqsEvent({ taskId: "t1", topic: "test", articleType: "essay" }));
+
+      assert.strictEqual(result.status, "researched");
+      // Three Claude calls — invalid type treated as absent, inference runs
+      assert.strictEqual(mockCreate.mock.calls.length, 3);
+    });
+
+    it("does not persist invalid articleType to DynamoDB", async () => {
+      await handler(sqsEvent({ taskId: "t1", topic: "test", articleType: "badtype" }));
+
+      const updateCalls = mockSend.mock.calls.filter(c => c.arguments[0].name === "UpdateCommand");
+      const researchedUpdate = updateCalls[updateCalls.length - 1];
+      const persistedType = researchedUpdate.arguments[0].params.ExpressionAttributeValues[":articleType"];
+      // Must be a valid type (inferred fallback), never the invalid input
+      assert.ok(["knowledge", "best-of", "how-to", "masterclass"].includes(persistedType),
+        `Expected valid articleType, got "${persistedType}"`);
+    });
   });
 
   // --- Happy path ---

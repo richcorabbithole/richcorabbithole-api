@@ -64,8 +64,21 @@ module.exports.handler = async (event) => {
     // --- Article type resolution ---
     // If not supplied by the caller, infer it from the topic with a cheap classification call.
     const VALID_ARTICLE_TYPES = ["knowledge", "best-of", "how-to", "masterclass"];
-    let resolvedArticleType = providedArticleType;
+
+    // Defensively validate even caller-supplied types: the worker is an SQS consumer
+    // and must not trust any field unconditionally (guards against replayed/crafted messages).
+    let resolvedArticleType = null;
     let articleTypeInferred = false;
+
+    if (providedArticleType) {
+      if (VALID_ARTICLE_TYPES.includes(providedArticleType)) {
+        resolvedArticleType = providedArticleType;
+        console.log(`Task ${taskId} article type provided: ${resolvedArticleType}`);
+      } else {
+        console.warn(`Task ${taskId} provided articleType "${providedArticleType}" is invalid, falling back to inference`);
+        // resolvedArticleType stays null — falls through to inference below
+      }
+    }
 
     if (!resolvedArticleType) {
       const typeMessage = await anthropicInstance.messages.create({
@@ -101,8 +114,6 @@ Types:
       }
 
       console.log(`Task ${taskId} article type inferred: ${resolvedArticleType}`);
-    } else {
-      console.log(`Task ${taskId} article type provided: ${resolvedArticleType}`);
     }
 
     // Research focus addendum — adapts the research prompt to gather the right raw material
