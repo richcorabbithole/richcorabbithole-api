@@ -13,6 +13,16 @@ const { PutCommand } = require("@aws-sdk/lib-dynamodb");
 const { randomUUID } = require("crypto");
 const { getDocClient, updateTaskStatus, sendSqsMessage } = require("./lib/shared-utils");
 
+/**
+ * Lambda handler for the research entry point (POST /research).
+ *
+ * Validates the request body, creates a pending task record in DynamoDB,
+ * and enqueues the task for the researchWorker via SQS. Returns 202 with
+ * the new taskId, or 4xx/5xx on validation or infrastructure errors.
+ *
+ * @param {object} event - API Gateway proxy event with a JSON-encoded body.
+ * @returns {Promise<{statusCode: number, body: string}>} API Gateway proxy response.
+ */
 module.exports.handler = async (event) => {
   try {
     // Expects a topic key which contains a string
