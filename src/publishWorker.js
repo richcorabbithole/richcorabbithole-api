@@ -246,11 +246,12 @@ async function commitNewCategorySiteFiles(repoPath, branchName, token, category,
       throw new Error(`commitNewCategorySiteFiles: Category type pattern not found in categoryConfig.ts — file may have been refactored`);
     }
     // 2b. Add the record entry.
+    const beforeRecordReplace = updatedCatConfig;
     updatedCatConfig = updatedCatConfig.replace(
       /(export const categoryConfig[^{]*\{)([\s\S]*?)(\};)/,
       (_, open, inner, close) => `${open}${inner}${newEntry}\n${close}`
     );
-    if (updatedCatConfig === catConfigContent) {
+    if (updatedCatConfig === beforeRecordReplace) {
       throw new Error(`commitNewCategorySiteFiles: categoryConfig pattern not found in categoryConfig.ts — file may have been refactored`);
     }
   }
@@ -308,15 +309,26 @@ module.exports.handler = async (event) => {
     // before proceeding. The last sibling to reach "ready" will find all siblings ready and
     // proceed to create the PR; earlier arrivals exit cleanly (message is consumed, not retried).
     if (task.parentTaskId) {
-      const siblings = await getChildTasks(docClient, process.env.TABLE_NAME, task.parentTaskId);
+      const allSiblings = await getChildTasks(docClient, process.env.TABLE_NAME, task.parentTaskId);
       const expectedTotal = task.totalParts;
 
-      // Guard against eventual-consistency GSI lag: if the GSI has not yet indexed all
-      // child records, a PR created now would be missing parts. Throw to trigger SQS retry
-      // (up to maxReceiveCount, then DLQ) — consistency lag is typically milliseconds.
-      if (siblings.length < expectedTotal) {
+      // Discard any orphaned children from a previous (different) outline — they have
+      // part numbers outside the range 1..expectedTotal. This can happen when a retry
+      // generated a different LLM outline before the outline-persistence fix was in place,
+      // or if the outline is re-stored on retry and the part count changed. publishWorker
+      // must only act on the canonical set of parts for this series.
+      const siblings = allSiblings.filter(s => s.part >= 1 && s.part <= expectedTotal);
+
+      // Guard against eventual-consistency GSI lag: we need exactly one child per part
+      // (parts 1..expectedTotal). If any part is missing, throw to trigger SQS retry.
+      const presentParts = new Set(siblings.map(s => s.part));
+      const missingParts = [];
+      for (let p = 1; p <= expectedTotal; p++) {
+        if (!presentParts.has(p)) missingParts.push(p);
+      }
+      if (missingParts.length > 0) {
         throw new Error(
-          `Series ${task.parentTaskId}: GSI returned ${siblings.length}/${expectedTotal} siblings — retrying for consistency`
+          `Series ${task.parentTaskId}: GSI missing parts [${missingParts.join(",")}] of ${expectedTotal} — retrying for consistency`
         );
       }
 

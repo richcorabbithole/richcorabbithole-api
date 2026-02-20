@@ -424,5 +424,81 @@ describe("researchWorker handler", () => {
         `series_researched update (call ${seriesUpdateIndex}) must come after last PutCommand (call ${lastPutIndex})`
       );
     });
+
+    it("persists seriesOutline to parent task before fan-out loop (Bug 2 — stable across retries)", async () => {
+      // The outline must be written to DynamoDB before any child PutCommand fires.
+      // This guarantees that if the loop crashes mid-way, a retry can read the stored
+      // outline and reuse it rather than calling Claude again (which could produce a
+      // different outline and leave orphaned children from the first attempt).
+      await handler(sqsEvent({ taskId: "t1", topic: "rust ownership", articleType: "masterclass" }));
+
+      const allCalls = mockSend.mock.calls;
+
+      // Find the UpdateCommand that stores the seriesOutline
+      const outlineUpdateIndex = allCalls.findIndex(c =>
+        c.arguments[0].name === "UpdateCommand" &&
+        c.arguments[0].params.ExpressionAttributeValues[":seriesOutline"] !== undefined
+      );
+      assert.ok(outlineUpdateIndex > -1, "Expected an UpdateCommand persisting seriesOutline before fan-out");
+
+      // First child PutCommand must come AFTER the outline is stored
+      const firstPutIndex = allCalls.findIndex(c => c.arguments[0].name === "PutCommand");
+      assert.ok(firstPutIndex > -1, "Expected at least one PutCommand for child tasks");
+      assert.ok(
+        outlineUpdateIndex < firstPutIndex,
+        `seriesOutline update (call ${outlineUpdateIndex}) must precede first child PutCommand (call ${firstPutIndex})`
+      );
+
+      // Verify the stored outline JSON is valid
+      const storedJson = allCalls[outlineUpdateIndex].arguments[0].params.ExpressionAttributeValues[":seriesOutline"];
+      const stored = JSON.parse(storedJson);
+      assert.strictEqual(stored.seriesSlug, "rust-ownership");
+      assert.strictEqual(stored.parts.length, 3);
+    });
+
+    it("reuses stored seriesOutline on retry instead of calling Claude for outline again (Bug 2)", async () => {
+      // Simulate a retry: the task record already has a seriesOutline stored from a previous
+      // attempt that crashed mid-loop. The handler must NOT call Claude for a new outline.
+      const storedOutline = JSON.stringify({
+        seriesTitle: "The Complete Guide to Rust Ownership",
+        seriesSlug: "rust-ownership",
+        parts: [
+          { part: 1, partTitle: "What is Ownership?", partScope: "Foundations of ownership." },
+          { part: 2, partTitle: "Borrowing and Lifetimes", partScope: "Borrow checker basics." },
+          { part: 3, partTitle: "Advanced Patterns", partScope: "Advanced usage." }
+        ]
+      });
+
+      // Provide task in "researching" status with seriesOutline already stored
+      mockSend.mock.mockImplementation(async (cmd) => {
+        if (cmd.name === "GetCommand") {
+          return { Item: { taskId: "t1", status: "researching", seriesOutline: storedOutline } };
+        }
+        if (cmd.name === "GetSecretValueCommand") {
+          return { SecretString: "sk-ant-test-key" };
+        }
+        return {};
+      });
+
+      // Override Claude: only 2 calls should happen (research + category); NOT a 3rd for outline
+      let claudeCallCount = 0;
+      mockCreate.mock.mockImplementation(async () => {
+        claudeCallCount++;
+        if (claudeCallCount === 1) return { content: [{ type: "text", text: "# Research\n\nContent." }] };
+        if (claudeCallCount === 2) return { content: [{ type: "text", text: JSON.stringify({ scores: { tech: 0.9 }, proposed: null }) }] };
+        // A 3rd call would be the outline re-generation — must not happen
+        throw new Error("Unexpected 3rd Claude call — outline should be reused from stored seriesOutline");
+      });
+
+      const result = await handler(sqsEvent({ taskId: "t1", topic: "rust ownership", articleType: "masterclass" }));
+      assert.strictEqual(result.status, "series_researched");
+      assert.strictEqual(result.totalParts, 3);
+      assert.strictEqual(claudeCallCount, 2, "Only research + category calls should fire; outline is reused");
+
+      // Verify children were created using the stored outline's part titles
+      const putCalls = mockSend.mock.calls.filter(c => c.arguments[0].name === "PutCommand");
+      assert.strictEqual(putCalls.length, 3, "Expected 3 children from stored outline");
+      assert.strictEqual(putCalls[0].arguments[0].params.Item.partTitle, "What is Ownership?");
+    });
   });
 });

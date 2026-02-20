@@ -295,7 +295,7 @@ Total time: 171s
 
 **Masterclass series (child tasks):** `pending` → `writing` → `drafted` → `editing` → `edited` → `optimizing` → `ready` → `waiting_for_siblings` (if other parts are still in progress) or straight to `published` (if last part to finish).
 
-The parent task stores `seriesTitle`, `seriesSlug`, and `totalParts`. Each child task stores `parentTaskId`, `part`, `totalParts`, `seriesSlug`, and `seriesTitle`.
+The parent task stores `seriesTitle`, `seriesSlug`, `totalParts`, and `seriesOutline` (JSON — persisted before fan-out so retries reuse the same outline). Each child task stores `parentTaskId`, `part`, `totalParts`, `seriesSlug`, and `seriesTitle`. On retry, `publishWorker` filters siblings to `part` in `1..totalParts` to discard any orphaned children from a prior (different) outline attempt.
 
 ## Stages
 

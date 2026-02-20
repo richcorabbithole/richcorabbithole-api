@@ -664,6 +664,53 @@ draft: true
         { message: "S3 bucket not found" }
       );
     });
+
+    it("throws when categoryConfig object literal pattern is missing even after type union was updated (Bug 1)", async () => {
+      // The type union pattern (`export type Category = ...`) exists and the first replace
+      // succeeds, mutating updatedCatConfig. The second guard MUST compare against the
+      // post-union value (beforeRecordReplace), not the original catConfigContent.
+      // Without the fix, the second check was `updatedCatConfig === catConfigContent` which
+      // would always be false after the first replace — silently skipping the record entry.
+      const CAT_CONFIG_MISSING_RECORD = `export type Category = 'tech' | 'science';\n// no categoryConfig object here\n`;
+      const TASK_WITH_NEW_CATEGORY = {
+        taskId: "t1",
+        status: "ready",
+        finalS3Key: "final/t1.md",
+        isNewCategory: true,
+        category: "food",
+        newCategoryColor: "#ff0000",
+      };
+
+      mockSend.mock.mockImplementation(async (cmd) => {
+        if (cmd.name === "GetCommand") return { Item: TASK_WITH_NEW_CATEGORY };
+        if (cmd.name === "GetSecretValueCommand") return defaultMockSend(cmd);
+        if (cmd.name === "GetObjectCommand") return defaultMockSend(cmd);
+        return {};
+      });
+
+      githubRoutes = (method, path, requestBody) => {
+        // Serve valid config.ts so the enum replace succeeds
+        if (method === "GET" && path.includes("content/config.ts")) {
+          return {
+            statusCode: 200,
+            body: { sha: "cfg-sha", content: Buffer.from(`hyperfixation: z.enum(['tech', 'science'])`).toString("base64") }
+          };
+        }
+        // Serve broken categoryConfig.ts — has the type union but NO categoryConfig object literal
+        if (method === "GET" && path.includes("categoryConfig.ts")) {
+          return {
+            statusCode: 200,
+            body: { sha: "catcfg-sha", content: Buffer.from(CAT_CONFIG_MISSING_RECORD).toString("base64") }
+          };
+        }
+        return defaultGitHubRoutes(method, path, requestBody);
+      };
+
+      await assert.rejects(
+        () => handler(sqsEvent({ taskId: "t1" })),
+        /categoryConfig pattern not found/
+      );
+    });
   });
 
   // --- Masterclass series publishing ---
@@ -844,7 +891,7 @@ draft: true
       assert.ok(mockHttpsRequest.mock.callCount() > 0, "Expected GitHub API calls to proceed");
     });
 
-    it("throws to trigger SQS retry when GSI returns fewer siblings than totalParts", async () => {
+    it("throws to trigger SQS retry when a part is missing from GSI results", async () => {
       // Simulate GSI eventual-consistency lag: only 1 of 2 siblings indexed
       mockSend.mock.mockImplementation(async (cmd) => {
         if (cmd.name === "GetCommand") {
@@ -862,10 +909,61 @@ draft: true
 
       await assert.rejects(
         () => handler(sqsEvent({ taskId: "t1" })),
-        /GSI returned 1\/2 siblings/
+        /GSI missing parts/
       );
       // No GitHub API calls should have been made
       assert.strictEqual(mockHttpsRequest.mock.callCount(), 0);
+    });
+
+    it("filters out orphaned siblings with part > totalParts before checking readiness", async () => {
+      // Orphaned child from a previous (different) outline on an earlier retry attempt.
+      // It has part=3 but totalParts=2 — should be silently discarded so it doesn't
+      // stall publishing or end up in the PR.
+      const ORPHAN_TASK = {
+        taskId: "t-orphan",
+        parentTaskId: "parent-uuid",
+        status: "ready",
+        finalS3Key: "final/t-orphan.md",
+        part: 3,          // outside the canonical 1..2 range
+        totalParts: 2,
+        seriesSlug: "rust-ownership",
+        seriesTitle: "The Complete Guide to Rust Ownership",
+        category: "tech",
+        isNewCategory: false,
+      };
+
+      mockSend.mock.mockImplementation(async (cmd) => {
+        if (cmd.name === "GetCommand") {
+          const key = cmd.params?.Key?.taskId;
+          if (key === "t1") return { Item: CHILD_TASK };
+          if (key === "parent-uuid") return { Item: PARENT_TASK };
+          return {};
+        }
+        if (cmd.name === "QueryCommand") {
+          // GSI returns both canonical siblings + the orphan
+          return { Items: [{ ...CHILD_TASK }, { ...SIBLING_TASK }, { ...ORPHAN_TASK }] };
+        }
+        if (cmd.name === "GetSecretValueCommand") {
+          return { SecretString: JSON.stringify({ appId: "12345", installationId: "67890", privateKey: "-----BEGIN RSA PRIVATE KEY-----\nfake-key\n-----END RSA PRIVATE KEY-----" }) };
+        }
+        if (cmd.name === "GetObjectCommand") {
+          return { Body: { transformToString: async () => SAMPLE_POST } };
+        }
+        return {};
+      });
+
+      const httpsCalls = [];
+      githubRoutes = (method, path, requestBody) => {
+        httpsCalls.push({ method, path, requestBody });
+        return defaultGitHubRoutes(method, path, requestBody);
+      };
+
+      const result = await handler(sqsEvent({ taskId: "t1" }));
+      assert.strictEqual(result.status, "published");
+
+      // Only 2 files should be committed — the orphan must not be included
+      const putCalls = httpsCalls.filter(c => c.method === "PUT" && c.path.includes("/contents/"));
+      assert.strictEqual(putCalls.length, 2, "Should commit exactly 2 files (orphan filtered out)");
     });
 
     it("persists waiting_for_siblings to DynamoDB when siblings are not all ready", async () => {
