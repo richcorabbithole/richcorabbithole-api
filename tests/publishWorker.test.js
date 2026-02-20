@@ -664,5 +664,354 @@ draft: true
         { message: "S3 bucket not found" }
       );
     });
+
+    it("throws when categoryConfig object literal pattern is missing even after type union was updated (Bug 1)", async () => {
+      // The type union pattern (`export type Category = ...`) exists and the first replace
+      // succeeds, mutating updatedCatConfig. The second guard MUST compare against the
+      // post-union value (beforeRecordReplace), not the original catConfigContent.
+      // Without the fix, the second check was `updatedCatConfig === catConfigContent` which
+      // would always be false after the first replace — silently skipping the record entry.
+      const CAT_CONFIG_MISSING_RECORD = `export type Category = 'tech' | 'science';\n// no categoryConfig object here\n`;
+      const TASK_WITH_NEW_CATEGORY = {
+        taskId: "t1",
+        status: "ready",
+        finalS3Key: "final/t1.md",
+        isNewCategory: true,
+        category: "food",
+        newCategoryColor: "#ff0000",
+      };
+
+      mockSend.mock.mockImplementation(async (cmd) => {
+        if (cmd.name === "GetCommand") return { Item: TASK_WITH_NEW_CATEGORY };
+        if (cmd.name === "GetSecretValueCommand") return defaultMockSend(cmd);
+        if (cmd.name === "GetObjectCommand") return defaultMockSend(cmd);
+        return {};
+      });
+
+      githubRoutes = (method, path, requestBody) => {
+        // Serve valid config.ts so the enum replace succeeds
+        if (method === "GET" && path.includes("content/config.ts")) {
+          return {
+            statusCode: 200,
+            body: { sha: "cfg-sha", content: Buffer.from(`hyperfixation: z.enum(['tech', 'science'])`).toString("base64") }
+          };
+        }
+        // Serve broken categoryConfig.ts — has the type union but NO categoryConfig object literal
+        if (method === "GET" && path.includes("categoryConfig.ts")) {
+          return {
+            statusCode: 200,
+            body: { sha: "catcfg-sha", content: Buffer.from(CAT_CONFIG_MISSING_RECORD).toString("base64") }
+          };
+        }
+        return defaultGitHubRoutes(method, path, requestBody);
+      };
+
+      await assert.rejects(
+        () => handler(sqsEvent({ taskId: "t1" })),
+        /categoryConfig pattern not found/
+      );
+    });
+  });
+
+  // --- Masterclass series publishing ---
+
+  describe("masterclass series publishing", () => {
+    const CHILD_TASK = {
+      taskId: "t1",
+      parentTaskId: "parent-uuid",
+      status: "ready",
+      finalS3Key: "final/t1.md",
+      seriesSlug: "rust-ownership",
+      seriesTitle: "The Complete Guide to Rust Ownership",
+      part: 1,
+      totalParts: 2,
+      category: "tech",
+      isNewCategory: false,
+    };
+
+    const SIBLING_TASK = {
+      taskId: "t2",
+      parentTaskId: "parent-uuid",
+      status: "ready",
+      finalS3Key: "final/t2.md",
+      seriesSlug: "rust-ownership",
+      seriesTitle: "The Complete Guide to Rust Ownership",
+      part: 2,
+      totalParts: 2,
+      category: "tech",
+      isNewCategory: false,
+    };
+
+    const PARENT_TASK = {
+      taskId: "parent-uuid",
+      status: "series_researched",
+      seriesSlug: "rust-ownership",
+      seriesTitle: "The Complete Guide to Rust Ownership",
+      totalParts: 2,
+    };
+
+    function makeSeriesMockSend(allReady = true, parentAlreadyPublished = false) {
+      return async (cmd) => {
+        if (cmd.name === "GetCommand") {
+          const key = cmd.params?.Key?.taskId;
+          if (key === "t1") return { Item: CHILD_TASK };
+          if (key === "parent-uuid") {
+            if (parentAlreadyPublished) return { Item: { ...PARENT_TASK, status: "published", prUrl: "https://github.com/pr/99", prNumber: 99, branchName: "series/rust-ownership" } };
+            return { Item: PARENT_TASK };
+          }
+          return {};
+        }
+        if (cmd.name === "QueryCommand") {
+          // Sibling query
+          const siblings = allReady
+            ? [{ ...CHILD_TASK }, { ...SIBLING_TASK }]
+            : [{ ...CHILD_TASK }, { ...SIBLING_TASK, status: "editing" }];
+          return { Items: siblings };
+        }
+        if (cmd.name === "GetSecretValueCommand") {
+          return { SecretString: JSON.stringify({ appId: "12345", installationId: "67890", privateKey: "-----BEGIN RSA PRIVATE KEY-----\nfake-key\n-----END RSA PRIVATE KEY-----" }) };
+        }
+        if (cmd.name === "GetObjectCommand") {
+          return { Body: { transformToString: async () => SAMPLE_POST } };
+        }
+        return {};
+      };
+    }
+
+    it("returns waiting_for_siblings when not all parts are ready", async () => {
+      mockSend.mock.mockImplementation(makeSeriesMockSend(false));
+
+      const result = await handler(sqsEvent({ taskId: "t1" }));
+      assert.strictEqual(result.status, "waiting_for_siblings");
+
+      // No GitHub calls should have been made
+      assert.strictEqual(mockHttpsRequest.mock.callCount(), 0);
+    });
+
+    it("creates series PR on series/ branch when all parts ready", async () => {
+      mockSend.mock.mockImplementation(makeSeriesMockSend(true));
+
+      const httpsCalls = [];
+      githubRoutes = (method, path, requestBody) => {
+        httpsCalls.push({ method, path, requestBody });
+        return defaultGitHubRoutes(method, path, requestBody);
+      };
+
+      const result = await handler(sqsEvent({ taskId: "t1" }));
+      assert.strictEqual(result.status, "published");
+
+      const branchCall = httpsCalls.find(c => c.method === "POST" && c.path.includes("/git/refs"));
+      assert.ok(branchCall, "Expected branch creation");
+      const branchBody = JSON.parse(branchCall.requestBody);
+      assert.ok(branchBody.ref.includes("series/rust-ownership"), "Branch should be series/");
+
+      const prCall = httpsCalls.find(c => c.method === "POST" && c.path.includes("/pulls"));
+      assert.ok(prCall, "Expected PR creation");
+      const prBody = JSON.parse(prCall.requestBody);
+      assert.ok(prBody.title.includes("The Complete Guide to Rust Ownership"), "PR title should include series title");
+    });
+
+    it("commits both part files to the series branch", async () => {
+      mockSend.mock.mockImplementation(makeSeriesMockSend(true));
+
+      const httpsCalls = [];
+      githubRoutes = (method, path, requestBody) => {
+        httpsCalls.push({ method, path, requestBody });
+        return defaultGitHubRoutes(method, path, requestBody);
+      };
+
+      await handler(sqsEvent({ taskId: "t1" }));
+
+      const putCalls = httpsCalls.filter(c => c.method === "PUT" && c.path.includes("/contents/"));
+      assert.strictEqual(putCalls.length, 2, "Should commit one file per part");
+    });
+
+    it("marks parent task and all child tasks as published", async () => {
+      mockSend.mock.mockImplementation(makeSeriesMockSend(true));
+
+      await handler(sqsEvent({ taskId: "t1" }));
+
+      const updateCalls = mockSend.mock.calls.filter(c => c.arguments[0].name === "UpdateCommand");
+      const publishedUpdates = updateCalls.filter(
+        c => c.arguments[0].params.ExpressionAttributeValues[":status"] === "published"
+      );
+      // Parent + 2 children = 3 published updates
+      assert.ok(publishedUpdates.length >= 3, `Expected ≥3 published updates, got ${publishedUpdates.length}`);
+    });
+
+    it("returns already_published when parent task is already published", async () => {
+      mockSend.mock.mockImplementation(makeSeriesMockSend(true, true));
+
+      const result = await handler(sqsEvent({ taskId: "t1" }));
+      assert.strictEqual(result.status, "already_published");
+      // No GitHub API calls
+      assert.strictEqual(mockHttpsRequest.mock.callCount(), 0);
+    });
+
+    it("resumes and completes publish when parent is stalled in publishing state", async () => {
+      // Simulate a previous attempt that claimed the publishing lock but failed before
+      // completing the GitHub operations. On retry the conditional update will throw
+      // ConditionalCheckFailedException, but the handler should re-fetch the parent,
+      // see "publishing", and fall through to the GitHub operations (which are idempotent).
+      mockSend.mock.mockImplementation(async (cmd) => {
+        if (cmd.name === "GetCommand") {
+          const key = cmd.params?.Key?.taskId;
+          if (key === "t1") return { Item: CHILD_TASK };
+          // Always return "publishing" for the parent (both initial check and re-fetch)
+          if (key === "parent-uuid") return { Item: { ...PARENT_TASK, status: "publishing" } };
+          return {};
+        }
+        if (cmd.name === "QueryCommand") {
+          return { Items: [{ ...CHILD_TASK }, { ...SIBLING_TASK }] };
+        }
+        if (cmd.name === "UpdateCommand") {
+          // Fail only the conditional lock-claim update; let plain updates succeed
+          if (cmd.params?.ConditionExpression) {
+            const err = new Error("The conditional request failed");
+            err.name = "ConditionalCheckFailedException";
+            throw err;
+          }
+          return {};
+        }
+        if (cmd.name === "GetSecretValueCommand") {
+          return { SecretString: JSON.stringify({ appId: "12345", installationId: "67890", privateKey: "-----BEGIN RSA PRIVATE KEY-----\nfake-key\n-----END RSA PRIVATE KEY-----" }) };
+        }
+        if (cmd.name === "GetObjectCommand") {
+          return { Body: { transformToString: async () => SAMPLE_POST } };
+        }
+        return {};
+      });
+
+      const result = await handler(sqsEvent({ taskId: "t1" }));
+
+      // Should complete publishing, not return waiting_for_siblings
+      assert.strictEqual(result.status, "published");
+
+      // GitHub should have been called (branch, commits, PR)
+      assert.ok(mockHttpsRequest.mock.callCount() > 0, "Expected GitHub API calls to proceed");
+    });
+
+    it("throws to trigger SQS retry when a part is missing from GSI results", async () => {
+      // Simulate GSI eventual-consistency lag: only 1 of 2 siblings indexed
+      mockSend.mock.mockImplementation(async (cmd) => {
+        if (cmd.name === "GetCommand") {
+          const key = cmd.params?.Key?.taskId;
+          if (key === "t1") return { Item: CHILD_TASK }; // CHILD_TASK.totalParts === 2
+          if (key === "parent-uuid") return { Item: PARENT_TASK };
+          return {};
+        }
+        if (cmd.name === "QueryCommand") {
+          // Only one sibling returned — GSI has not indexed the second yet
+          return { Items: [{ ...CHILD_TASK }] };
+        }
+        return {};
+      });
+
+      await assert.rejects(
+        () => handler(sqsEvent({ taskId: "t1" })),
+        /GSI missing parts/
+      );
+      // No GitHub API calls should have been made
+      assert.strictEqual(mockHttpsRequest.mock.callCount(), 0);
+    });
+
+    it("filters out orphaned siblings with part > totalParts before checking readiness", async () => {
+      // Orphaned child from a previous (different) outline on an earlier retry attempt.
+      // It has part=3 but totalParts=2 — should be silently discarded so it doesn't
+      // stall publishing or end up in the PR.
+      const ORPHAN_TASK = {
+        taskId: "t-orphan",
+        parentTaskId: "parent-uuid",
+        status: "ready",
+        finalS3Key: "final/t-orphan.md",
+        part: 3,          // outside the canonical 1..2 range
+        totalParts: 2,
+        seriesSlug: "rust-ownership",
+        seriesTitle: "The Complete Guide to Rust Ownership",
+        category: "tech",
+        isNewCategory: false,
+      };
+
+      mockSend.mock.mockImplementation(async (cmd) => {
+        if (cmd.name === "GetCommand") {
+          const key = cmd.params?.Key?.taskId;
+          if (key === "t1") return { Item: CHILD_TASK };
+          if (key === "parent-uuid") return { Item: PARENT_TASK };
+          return {};
+        }
+        if (cmd.name === "QueryCommand") {
+          // GSI returns both canonical siblings + the orphan
+          return { Items: [{ ...CHILD_TASK }, { ...SIBLING_TASK }, { ...ORPHAN_TASK }] };
+        }
+        if (cmd.name === "GetSecretValueCommand") {
+          return { SecretString: JSON.stringify({ appId: "12345", installationId: "67890", privateKey: "-----BEGIN RSA PRIVATE KEY-----\nfake-key\n-----END RSA PRIVATE KEY-----" }) };
+        }
+        if (cmd.name === "GetObjectCommand") {
+          return { Body: { transformToString: async () => SAMPLE_POST } };
+        }
+        return {};
+      });
+
+      const httpsCalls = [];
+      githubRoutes = (method, path, requestBody) => {
+        httpsCalls.push({ method, path, requestBody });
+        return defaultGitHubRoutes(method, path, requestBody);
+      };
+
+      const result = await handler(sqsEvent({ taskId: "t1" }));
+      assert.strictEqual(result.status, "published");
+
+      // Only 2 files should be committed — the orphan must not be included
+      const putCalls = httpsCalls.filter(c => c.method === "PUT" && c.path.includes("/contents/"));
+      assert.strictEqual(putCalls.length, 2, "Should commit exactly 2 files (orphan filtered out)");
+    });
+
+    it("persists waiting_for_siblings to DynamoDB when siblings are not all ready", async () => {
+      // makeSeriesMockSend(false) returns 2 siblings with one in "editing" (count === totalParts,
+      // but not all ready) — so the count guard passes, allReady is false
+      mockSend.mock.mockImplementation(makeSeriesMockSend(false));
+
+      const result = await handler(sqsEvent({ taskId: "t1" }));
+      assert.strictEqual(result.status, "waiting_for_siblings");
+
+      // Must have updated DynamoDB to persist the status
+      const updateCalls = mockSend.mock.calls.filter(c => c.arguments[0].name === "UpdateCommand");
+      const waitingUpdate = updateCalls.find(c =>
+        c.arguments[0].params.ExpressionAttributeValues[":status"] === "waiting_for_siblings"
+      );
+      assert.ok(waitingUpdate, "Expected UpdateCommand to persist waiting_for_siblings status");
+    });
+
+    it("uses unique fallback slugs when two parts produce the same slug (Bug 2)", async () => {
+      // Both parts return the same SAMPLE_POST (same title → same slug after slugify).
+      // The second part must receive a deterministic fallback slug rather than overwriting
+      // the first part's file in the branch.
+      mockSend.mock.mockImplementation(makeSeriesMockSend(true));
+
+      const httpsCalls = [];
+      githubRoutes = (method, path, requestBody) => {
+        httpsCalls.push({ method, path, requestBody });
+        return defaultGitHubRoutes(method, path, requestBody);
+      };
+
+      await handler(sqsEvent({ taskId: "t1" }));
+
+      const putCalls = httpsCalls.filter(c => c.method === "PUT" && c.path.includes("/contents/"));
+      assert.strictEqual(putCalls.length, 2, "Should commit two separate files");
+
+      // Extract the file paths from the PUT URLs
+      const filePaths = putCalls.map(c => {
+        // path is like /repos/owner/repo/contents/blog/src/content/blog/some-slug.md
+        return c.path.split("/contents/")[1];
+      });
+
+      // Both paths must be distinct — no silent overwrite of the same file
+      assert.notStrictEqual(filePaths[0], filePaths[1],
+        `Both parts committed to the same path "${filePaths[0]}" — slug collision not resolved`);
+
+      // The second path must use the deterministic fallback pattern ${seriesSlug}-part-N
+      const fallbackPath = filePaths.find(p => p.includes("rust-ownership-part-"));
+      assert.ok(fallbackPath, `Expected a fallback slug path containing "rust-ownership-part-", got: ${filePaths}`);
+    });
   });
 });

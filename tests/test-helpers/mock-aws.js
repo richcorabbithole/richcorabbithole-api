@@ -171,6 +171,9 @@ function setupWorkerMocks(mockSend, mockCreate, options = {}) {
     },
     GetCommand: class GetCommand {
       constructor(params) { this.params = params; this.name = "GetCommand"; }
+    },
+    PutCommand: class PutCommand {
+      constructor(params) { this.params = params; this.name = "PutCommand"; }
     }
   });
 
@@ -288,6 +291,12 @@ function setupPublishWorkerMocks(mockSend, mockHttpsRequest) {
     },
     GetCommand: class GetCommand {
       constructor(params) { this.params = params; this.name = "GetCommand"; }
+    },
+    QueryCommand: class QueryCommand {
+      constructor(params) { this.params = params; this.name = "QueryCommand"; }
+    },
+    PutCommand: class PutCommand {
+      constructor(params) { this.params = params; this.name = "PutCommand"; }
     }
   });
 

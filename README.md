@@ -83,7 +83,7 @@ Client (CLI) ─── POST /research ───> API Gateway (IAM auth)
 - **API Gateway** - REST endpoint with IAM authorization
 - **SQS** - Async job queue with dead letter queue
 - **S3** - Research content storage (`richcorabbithole-research-{stage}`)
-- **DynamoDB** - Task tracking (`richcorabbithole-tasks-{stage}`, GSI on `status` for querying by pipeline stage)
+- **DynamoDB** - Task tracking (`richcorabbithole-tasks-{stage}`, GSI on `status` for querying by pipeline stage, GSI on `parentTaskId` for querying series child tasks)
 - **Secrets Manager** - Claude API key and GitHub App credentials
 - **GitHub API** - PR creation via GitHub App (installation token auth)
 
@@ -93,25 +93,27 @@ Client (CLI) ─── POST /research ───> API Gateway (IAM auth)
 src/
   hello.js              # Health check endpoint
   research.js           # Thin accept handler (validate, queue, 202)
-  researchWorker.js     # SQS research worker (Claude API, S3, DynamoDB)
-  writeWorker.js        # SQS writing worker (drafts & revisions)
+  researchWorker.js     # SQS research worker (Claude API, S3, DynamoDB; masterclass fan-out)
+  writeWorker.js        # SQS writing worker (drafts & revisions; series-aware frontmatter)
   editWorker.js         # SQS editing worker (copy editing & polishing)
   seoWorker.js          # SQS SEO worker (metadata optimization)
-  publishWorker.js      # SQS publish worker (GitHub PR creation)
+  publishWorker.js      # SQS publish worker (single post or series PR collection)
   lib/
     shared-utils.js     # Shared AWS utilities (clients, helpers, SQS send)
 tests/
   hello.test.js         # Tests for health check
   research.test.js      # Tests for accept handler
-  researchWorker.test.js # Tests for research worker
-  writeWorker.test.js   # Tests for write worker
+  researchWorker.test.js # Tests for research worker (including masterclass fan-out)
+  writeWorker.test.js   # Tests for write worker (including series child task)
   editWorker.test.js    # Tests for edit worker
   seoWorker.test.js     # Tests for SEO worker
+  publishWorker.test.js # Tests for publish worker (including series collection)
+  cli.test.js           # Tests for CLI commands (including series-status)
   test-helpers/
     mock-aws.js         # AWS SDK mock infrastructure
     worker-test-utils.js # Shared worker test behaviors
 scripts/
-  cli.js                # Unified CLI (publish, research, draft, read-draft, approve, reject)
+  cli.js                # Unified CLI (publish, research, draft, read-draft, approve, reject, delete, series-status)
 .github/workflows/
   test.yml              # Run tests on PRs + EoL check
   deploy-dev.yml        # Deploy on merge to development
@@ -165,6 +167,7 @@ node scripts/cli.js <command> [options]
 ```bash
 node scripts/cli.js publish "quantum computing" --category tech --profile richcorabbithole
 node scripts/cli.js publish "black holes" --category science --stage prod --profile richcorabbithole
+node scripts/cli.js publish "machine learning fundamentals" --article-type masterclass --profile richcorabbithole
 ```
 
 **research** — Trigger a research task via the API (SigV4-signed):
@@ -200,12 +203,29 @@ node scripts/cli.js reject <taskId> --stage prod --profile richcorabbithole
 
 Both commands set an `approval` field (`"approved"` or `"rejected"`) and a timestamp (`approvedAt` / `rejectedAt`) on the DynamoDB task record. Tasks with no `approval` field have not been reviewed yet. This data is used for training data curation — scan for `approval = "approved"` to collect positive examples.
 
+**series-status** — Show the status of all parts in a masterclass series (pass any task ID from the series):
+
+```bash
+node scripts/cli.js series-status <taskId> --stage dev --profile richcorabbithole
+```
+
+Prints a table of part number, title, and pipeline status for all sibling tasks in the series.
+
+**delete** — Delete a task record and all affiliated S3 objects:
+
+```bash
+node scripts/cli.js delete <taskId> --stage dev --profile richcorabbithole
+```
+
+Removes all S3 objects associated with the task (`research/`, `drafts/`, `edited/`, `final/`) then deletes the DynamoDB item. S3 objects are deleted first so the record is never orphaned without its files. For masterclass parent tasks, all child tasks are cascaded through first (S3 + DynamoDB) before the parent is removed.
+
 ### Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--topic` | (required for `research`) | Research topic (max 500 characters) |
 | `--category` | (optional) | Blog category slug — e.g. `tech`, `science`, `history`, `gaming`, `maker`, `pop-culture`, `other`. New categories can be invented by the pipeline. |
+| `--article-type` | (optional) | Override article type — `knowledge`, `best-of`, `how-to`, `masterclass`. If omitted, Claude infers the best type for the topic. |
 | `--stage` | `dev` | Target stage (`dev` or `prod`) |
 | `--profile` | `AWS_PROFILE` env var | AWS CLI profile for credentials |
 
@@ -269,7 +289,13 @@ Total time: 171s
 
 ### Pipeline Status Flow
 
-Task status progresses: `pending` → `researching` → `researched` → `writing` → `drafted` → `editing` → `edited` → `optimizing` → `ready` → `publishing` → `published` (or `failed` at any step).
+**Standard articles:** `pending` → `researching` → `researched` → `writing` → `drafted` → `editing` → `edited` → `optimizing` → `ready` → `publishing` → `published` (or `failed` at any step).
+
+**Masterclass series (parent task):** `pending` → `researching` → `series_researched` → `publishing` → `published`
+
+**Masterclass series (child tasks):** `pending` → `writing` → `drafted` → `editing` → `edited` → `optimizing` → `ready` → `waiting_for_siblings` (if other parts are still in progress) or straight to `published` (if last part to finish).
+
+The parent task stores `seriesTitle`, `seriesSlug`, `totalParts`, and `seriesOutline` (JSON — persisted before fan-out so retries reuse the same outline). Each child task stores `parentTaskId`, `part`, `totalParts`, `seriesSlug`, and `seriesTitle`. Child tasks are written with `attribute_not_exists(taskId)` so a retry that finds an already-progressed child skips the put and does not re-enqueue the write job. On retry, `publishWorker` filters siblings to `part` in `1..totalParts` to discard any orphaned children from a prior (different) outline attempt.
 
 ## Stages
 

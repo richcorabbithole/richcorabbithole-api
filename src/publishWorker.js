@@ -17,7 +17,7 @@
  *   - Throw an error → SQS retries (up to maxReceiveCount=2), then DLQ
  */
 
-const { GetCommand } = require("@aws-sdk/lib-dynamodb");
+const { GetCommand, QueryCommand, UpdateCommand } = require("@aws-sdk/lib-dynamodb");
 const { getDocClient, getS3Object, getGitHubToken, githubApiRequest, updateTaskStatus, parseSqsMessage, addKnownCategory } = require("./lib/shared-utils");
 
 const GITHUB_OWNER = "richcorabbithole";
@@ -137,6 +137,45 @@ function buildPrBody(frontmatter, wordCount, taskId) {
 }
 
 /**
+ * Build the PR description for a masterclass series.
+ */
+function buildSeriesPrBody(seriesTitle, seriesSlug, parts, parentTaskId) {
+  const lines = [
+    "## New Masterclass Series",
+    "",
+    `**Series:** ${seriesTitle}`,
+    `**Parts:** ${parts.length}`,
+    "",
+    "### Parts",
+  ];
+  for (const p of parts) {
+    lines.push(`- **Part ${p.part}:** ${p.title}`);
+  }
+  lines.push(
+    "",
+    "---",
+    `*Automated by the richcorabbithole pipeline — Series task ID: \`${parentTaskId}\`*`
+  );
+  return lines.join("\n");
+}
+
+/**
+ * Query all child tasks for a given parentTaskId via the GSI.
+ * Returns array of DynamoDB items.
+ */
+async function getChildTasks(docClient, tableName, parentTaskId) {
+  const result = await docClient.send(
+    new QueryCommand({
+      TableName: tableName,
+      IndexName: "parentTaskId-index",
+      KeyConditionExpression: "parentTaskId = :pid",
+      ExpressionAttributeValues: { ":pid": parentTaskId },
+    })
+  );
+  return result.Items || [];
+}
+
+/**
  * Fetch a file from the repo on a given branch.
  * Returns { content: string, sha: string }.
  */
@@ -189,19 +228,30 @@ async function commitNewCategorySiteFiles(repoPath, branchName, token, category,
   }
   await commitRepoFile(repoPath, SITE_CONFIG_PATH, branchName, token, updatedConfig, configSha, `Add category: ${category}`);
 
-  // 2. categoryConfig.ts — add record entry
+  // 2. categoryConfig.ts — add to Category type union and add record entry
   // Quote the key so hyphenated slugs (e.g. "true-crime") produce valid TS object literals.
   const { content: catConfigContent, sha: catConfigSha } = await getRepoFile(repoPath, SITE_CAT_CONFIG_PATH, branchName, token);
   const newEntry = `  '${category}': { label: '${label}', color: 'var(${cssVar})' },`;
-  const alreadyInCatConfig = catConfigContent.includes(`'${category}':`) || catConfigContent.includes(`"${category}":`)
-    || !!catConfigContent.match(new RegExp(`\\b${category}\\s*:`));
+  // Use quoted-key checks only — avoid the bare-word regex which falsely matches
+  // unquoted object keys (e.g. `lifestyle:`) before the entry is actually present.
+  const alreadyInCatConfig = catConfigContent.includes(`'${category}'`) || catConfigContent.includes(`"${category}"`);
   let updatedCatConfig = catConfigContent;
   if (!alreadyInCatConfig) {
-    updatedCatConfig = catConfigContent.replace(
+    // 2a. Add to the `export type Category = ...` union on the first line.
+    updatedCatConfig = updatedCatConfig.replace(
+      /(export type Category\s*=\s*)([\s\S]*?)(;)/,
+      (_, open, inner, close) => `${open}${inner.trimEnd()} | '${category}'${close}`
+    );
+    if (updatedCatConfig === catConfigContent) {
+      throw new Error(`commitNewCategorySiteFiles: Category type pattern not found in categoryConfig.ts — file may have been refactored`);
+    }
+    // 2b. Add the record entry.
+    const beforeRecordReplace = updatedCatConfig;
+    updatedCatConfig = updatedCatConfig.replace(
       /(export const categoryConfig[^{]*\{)([\s\S]*?)(\};)/,
       (_, open, inner, close) => `${open}${inner}${newEntry}\n${close}`
     );
-    if (updatedCatConfig === catConfigContent) {
+    if (updatedCatConfig === beforeRecordReplace) {
       throw new Error(`commitNewCategorySiteFiles: categoryConfig pattern not found in categoryConfig.ts — file may have been refactored`);
     }
   }
@@ -253,6 +303,233 @@ module.exports.handler = async (event) => {
       console.log(`Task ${taskId} already published, skipping`);
       return { taskId, status: "already_published" };
     }
+
+    // --- Series child task path ---
+    // If this task is a child of a masterclass series, check whether all siblings are ready
+    // before proceeding. The last sibling to reach "ready" will find all siblings ready and
+    // proceed to create the PR; earlier arrivals exit cleanly (message is consumed, not retried).
+    if (task.parentTaskId) {
+      const allSiblings = await getChildTasks(docClient, process.env.TABLE_NAME, task.parentTaskId);
+      const expectedTotal = task.totalParts;
+
+      // Discard any orphaned children from a previous (different) outline — they have
+      // part numbers outside the range 1..expectedTotal. This can happen when a retry
+      // generated a different LLM outline before the outline-persistence fix was in place,
+      // or if the outline is re-stored on retry and the part count changed. publishWorker
+      // must only act on the canonical set of parts for this series.
+      const siblings = allSiblings.filter(s => s.part >= 1 && s.part <= expectedTotal);
+
+      // Guard against eventual-consistency GSI lag: we need exactly one child per part
+      // (parts 1..expectedTotal). If any part is missing, throw to trigger SQS retry.
+      const presentParts = new Set(siblings.map(s => s.part));
+      const missingParts = [];
+      for (let p = 1; p <= expectedTotal; p++) {
+        if (!presentParts.has(p)) missingParts.push(p);
+      }
+      if (missingParts.length > 0) {
+        throw new Error(
+          `Series ${task.parentTaskId}: GSI missing parts [${missingParts.join(",")}] of ${expectedTotal} — retrying for consistency`
+        );
+      }
+
+      // "waiting_for_siblings" counts as ready-enough: the task has completed all pipeline
+      // stages and already persisted that status in a prior publishWorker invocation.
+      const READY_STATUSES = new Set(["ready", "waiting_for_siblings", "published"]);
+      const allReady = siblings.every(s => READY_STATUSES.has(s.status));
+
+      if (!allReady) {
+        const readyCount = siblings.filter(s => READY_STATUSES.has(s.status)).length;
+        console.log(`Series task ${taskId}: ${readyCount}/${siblings.length} parts ready — persisting waiting_for_siblings`);
+        // Persist status so CLI series-status reflects accurate progress.
+        await updateTaskStatus(taskId, "waiting_for_siblings", { waitedAt: new Date().toISOString() });
+        return { taskId, status: "waiting_for_siblings" };
+      }
+
+      // All siblings ready — check if PR already created (idempotency)
+      const parentResult = await docClient.send(
+        new GetCommand({ TableName: process.env.TABLE_NAME, Key: { taskId: task.parentTaskId } })
+      );
+      const parentTask = parentResult.Item;
+      if (parentTask && parentTask.status === "published") {
+        console.log(`Series parent ${task.parentTaskId} already published, marking child ${taskId} published`);
+        await updateTaskStatus(taskId, "published", { publishedAt: new Date().toISOString(), prUrl: parentTask.prUrl, prNumber: parentTask.prNumber, branchName: parentTask.branchName });
+        return { taskId, status: "already_published" };
+      }
+
+      // Mark parent as publishing to claim PR creation (first sibling to get here wins)
+      try {
+        await docClient.send(
+          new UpdateCommand({
+            TableName: process.env.TABLE_NAME,
+            Key: { taskId: task.parentTaskId },
+            UpdateExpression: "SET #status = :publishing, updatedAt = :now",
+            ConditionExpression: "#status <> :publishing AND #status <> :published",
+            ExpressionAttributeNames: { "#status": "status" },
+            ExpressionAttributeValues: {
+              ":publishing": "publishing",
+              ":published": "published",
+              ":now": new Date().toISOString(),
+            },
+          })
+        );
+      } catch (condErr) {
+        if (condErr.name === "ConditionalCheckFailedException") {
+          // Re-fetch parent to distinguish two cases:
+          // 1. Parent is "published" → another sibling completed the PR, we're done.
+          // 2. Parent is "publishing" → a previous attempt claimed the lock but failed
+          //    mid-way (GitHub error, S3 read error, etc.). Treat the existing lock as
+          //    ours and fall through to the GitHub operations — they're all idempotent.
+          const recheck = await docClient.send(
+            new GetCommand({ TableName: process.env.TABLE_NAME, Key: { taskId: task.parentTaskId } })
+          );
+          const recheckParent = recheck.Item;
+          if (recheckParent && recheckParent.status === "published") {
+            console.log(`Series parent ${task.parentTaskId} already published — marking child ${taskId} published`);
+            await updateTaskStatus(taskId, "published", { publishedAt: new Date().toISOString(), prUrl: recheckParent.prUrl, prNumber: recheckParent.prNumber, branchName: recheckParent.branchName });
+            return { taskId, status: "already_published" };
+          }
+          if (recheckParent && recheckParent.status === "publishing") {
+            console.log(`Series parent ${task.parentTaskId} is stalled in publishing — resuming`);
+            // Fall through to the GitHub operations below
+          } else {
+            console.log(`Series parent ${task.parentTaskId} already being published by another sibling — skipping`);
+            return { taskId, status: "waiting_for_siblings" };
+          }
+        } else {
+          throw condErr;
+        }
+      }
+
+      // Sort siblings by part number, collect their final posts
+      const sortedSiblings = [...siblings].sort((a, b) => (a.part || 0) - (b.part || 0));
+      const token = await getGitHubToken();
+      const repoPath = `/repos/${GITHUB_OWNER}/${GITHUB_REPO}`;
+
+      // Get base branch SHA
+      const devRef = await githubApiRequest("GET", `${repoPath}/git/ref/heads/${BASE_BRANCH}`, token);
+      const baseSha = devRef.object.sha;
+
+      const seriesSlug = task.seriesSlug;
+      const seriesTitle = task.seriesTitle;
+      const branchName = `series/${seriesSlug}`;
+
+      // Create series branch
+      try {
+        await githubApiRequest("POST", `${repoPath}/git/refs`, token, {
+          ref: `refs/heads/${branchName}`,
+          sha: baseSha,
+        });
+      } catch (err) {
+        if (!(err.statusCode === 422 && err.response?.message?.includes("Reference already exists"))) {
+          throw err;
+        }
+        console.log(`Branch ${branchName} already exists — continuing`);
+      }
+
+      // Commit new-category site files from the first part (if applicable)
+      const firstPart = sortedSiblings[0];
+      if (firstPart.isNewCategory && firstPart.category && firstPart.newCategoryColor) {
+        await commitNewCategorySiteFiles(repoPath, branchName, token, firstPart.category, firstPart.newCategoryColor);
+      }
+
+      // Commit each part's markdown file
+      const partSummaries = [];
+      const usedSlugs = new Set(); // track across siblings to prevent silent overwrites
+      for (const sibling of sortedSiblings) {
+        const postContent = await getS3Object(sibling.finalS3Key);
+        const { frontmatter } = parseFrontmatter(postContent);
+        const title = frontmatter.title || `Part ${sibling.part}`;
+        const SLUG_RE = /^[a-z][a-z0-9-]{0,49}$/;
+        const rawSlug = typeof frontmatter.slug === "string" ? frontmatter.slug.trim() : "";
+        let slug = (SLUG_RE.test(rawSlug) ? rawSlug : null) || slugify(title) || `${seriesSlug}-part-${sibling.part}`;
+        // If another part already claimed this slug, fall back to a deterministic unique slug
+        // rather than silently overwriting the earlier part's file in the branch.
+        if (usedSlugs.has(slug)) {
+          slug = `${seriesSlug}-part-${sibling.part}`;
+          console.warn(`Series ${seriesSlug}: slug collision for part ${sibling.part} — using fallback slug "${slug}"`);
+        }
+        usedSlugs.add(slug);
+        const filePath = `${BLOG_PATH_PREFIX}/${slug}.md`;
+        const encodedContent = Buffer.from(postContent).toString("base64");
+
+        let skipCommit = false;
+        let existingFileSha = null;
+        try {
+          const existing = await githubApiRequest("GET", `${repoPath}/contents/${filePath}?ref=${branchName}`, token);
+          if (existing.content?.replace(/\n/g, "") === encodedContent) {
+            skipCommit = true;
+          } else {
+            existingFileSha = existing.sha;
+          }
+        } catch (err) {
+          if (err.statusCode !== 404) throw err;
+        }
+
+        if (!skipCommit) {
+          const commitPayload = {
+            message: `Add series part ${sibling.part}: ${title}`,
+            content: encodedContent,
+            branch: branchName,
+          };
+          if (existingFileSha) commitPayload.sha = existingFileSha;
+          await githubApiRequest("PUT", `${repoPath}/contents/${filePath}`, token, commitPayload);
+        }
+
+        partSummaries.push({ part: sibling.part, title, slug });
+      }
+
+      // Create the series PR
+      const prBody = buildSeriesPrBody(seriesTitle, seriesSlug, partSummaries, task.parentTaskId);
+      let pr;
+      try {
+        pr = await githubApiRequest("POST", `${repoPath}/pulls`, token, {
+          title: `New series: ${seriesTitle}`,
+          body: prBody,
+          head: branchName,
+          base: BASE_BRANCH,
+        });
+      } catch (err) {
+        if (err.statusCode === 422) {
+          const prs = await githubApiRequest("GET", `${repoPath}/pulls?head=${GITHUB_OWNER}:${branchName}&base=${BASE_BRANCH}&state=open`, token);
+          if (prs.length > 0) {
+            pr = prs[0];
+          } else {
+            throw err;
+          }
+        } else {
+          throw err;
+        }
+      }
+
+      // Persist new category to DynamoDB (non-fatal)
+      if (firstPart.isNewCategory && firstPart.category) {
+        try {
+          const description = firstPart.categoryDescription || `topics related to ${firstPart.category}`;
+          await addKnownCategory(firstPart.category, description);
+        } catch (catErr) {
+          console.error(`Failed to persist new category (non-fatal):`, catErr);
+        }
+      }
+
+      // Mark parent task published
+      const publishedAt = new Date().toISOString();
+      await updateTaskStatus(task.parentTaskId, "published", {
+        publishedAt,
+        prUrl: pr.html_url,
+        prNumber: pr.number,
+        branchName,
+      });
+
+      // Mark all child tasks published
+      for (const sibling of sortedSiblings) {
+        await updateTaskStatus(sibling.taskId, "published", { publishedAt, prUrl: pr.html_url, prNumber: pr.number, branchName });
+      }
+
+      console.log(`Published series "${seriesTitle}" (${sortedSiblings.length} parts): PR #${pr.number} at ${pr.html_url}`);
+      return { taskId, parentTaskId: task.parentTaskId, prUrl: pr.html_url, prNumber: pr.number, status: "published" };
+    }
+
+    // --- Standard single-post path ---
 
     // Allow retries for in-progress publishing or expected ready status
     const isExpected = task.status === "ready";

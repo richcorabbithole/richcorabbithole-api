@@ -15,8 +15,9 @@
  * the message — losing the task forever.
  */
 
-const { GetCommand } = require("@aws-sdk/lib-dynamodb");
+const { GetCommand, PutCommand } = require("@aws-sdk/lib-dynamodb");
 const { PutObjectCommand } = require("@aws-sdk/client-s3");
+const { createHash } = require("crypto");
 const { getDocClient, getS3Client, getAnthropicApiKey, updateTaskStatus, parseSqsMessage, sendSqsMessage, getKnownCategories } = require("./lib/shared-utils");
 
 module.exports.handler = async (event) => {
@@ -47,9 +48,13 @@ module.exports.handler = async (event) => {
       })
     );
 
-    if (existing.Item && existing.Item.status === "researched") {
-      console.log(`Task ${taskId} already researched, skipping`);
-      return { taskId, status: "already_researched" };
+    // Treat any post-research status as already done — guards against SQS at-least-once
+    // delivery re-running the full pipeline (including the masterclass fan-out) on retry.
+    // "failed" is intentionally excluded: failed tasks should be retried by SQS for recovery.
+    const ALREADY_DONE_STATUSES = ["researched", "series_researched", "publishing", "published"];
+    if (existing.Item && ALREADY_DONE_STATUSES.includes(existing.Item.status)) {
+      console.log(`Task ${taskId} already processed (status: ${existing.Item.status}), skipping`);
+      return { taskId, status: "already_processed" };
     }
 
     // Update the task record to researching
@@ -300,6 +305,215 @@ ${researchContent.slice(0, 3000)}`;
     }
 
     console.log(`Task ${taskId} category resolved: ${resolvedCategory} (isNew: ${isNewCategory})`);
+
+    // --- Masterclass series fan-out ---
+    // For masterclass articles, generate a series outline and create child tasks (one per part).
+    // The parent task tracks the series; each child flows through the normal write→edit→SEO pipeline.
+    // The publishWorker collects all children when they're all ready and creates one PR.
+    if (resolvedArticleType === "masterclass") {
+      // Reuse a previously stored outline if this is a retry after a mid-loop crash.
+      // The outline is persisted to DynamoDB before the fan-out loop starts, so a crash
+      // inside the loop leaves the parent record with a stable `seriesOutline` JSON string.
+      // On retry we parse it instead of calling Claude again — this prevents LLM
+      // non-determinism from producing a different outline and leaving orphaned children.
+      let parts, seriesTitle, seriesSlug;
+      const SERIES_SLUG_RE = /^[a-z][a-z0-9-]{0,29}$/;
+
+      if (existing.Item && existing.Item.seriesOutline) {
+        console.log(`Task ${taskId} reusing stored series outline (retry path)`);
+        try {
+          const stored = JSON.parse(existing.Item.seriesOutline);
+          if (
+            stored &&
+            typeof stored.seriesTitle === "string" &&
+            typeof stored.seriesSlug === "string" &&
+            SERIES_SLUG_RE.test(stored.seriesSlug) &&
+            Array.isArray(stored.parts) &&
+            stored.parts.length >= 1 &&
+            stored.parts.length <= 6
+          ) {
+            parts = stored.parts;
+            seriesTitle = stored.seriesTitle;
+            seriesSlug = stored.seriesSlug;
+          }
+        } catch {
+          console.warn(`Task ${taskId} stored seriesOutline JSON parse failed, re-generating`);
+        }
+      }
+
+      if (!parts) {
+        // Generate series outline: seriesTitle, seriesSlug, parts array
+        const outlineMessage = await anthropicInstance.messages.create({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 1024,
+          system: `You are a curriculum designer for a technical blog. Given research on a topic, produce a series outline for a masterclass learning series.
+
+Rules:
+- 3–6 parts total. Choose the count that best fits the topic's natural scope — don't pad or compress.
+- Each part should be a focused, standalone 800–1500 word post that builds on previous parts.
+- Parts must form a logical learning arc: foundations first, then intermediate, then advanced/synthesis.
+- seriesSlug: lowercase, hyphenated, max 30 chars (e.g. "rust-ownership", "docker-networking")
+- partScope: 2–4 sentences describing what THIS part covers and what the reader will understand after reading it. Be specific — the writer will use this as their brief.
+- Respond with ONLY valid JSON — no markdown, no explanation.`,
+          messages: [{
+            role: "user",
+            content: `Topic: ${topic}\n\nResearch summary:\n${researchContent.slice(0, 4000)}\n\nRespond with ONLY:\n{\n  "seriesTitle": "...",\n  "seriesSlug": "...",\n  "parts": [\n    { "part": 1, "partTitle": "...", "partScope": "..." },\n    ...\n  ]\n}`
+          }]
+        });
+
+        const outlineTextBlock = outlineMessage.content.find(b => b.type === "text");
+        let outline = null;
+        if (outlineTextBlock) {
+          try {
+            outline = JSON.parse(outlineTextBlock.text.trim());
+          } catch {
+            console.warn(`Task ${taskId} series outline JSON parse failed, falling back to single-part`);
+          }
+        }
+
+        // Validate outline shape — fall back to a single-part series if malformed
+        const isValidOutline = outline &&
+          typeof outline.seriesTitle === "string" &&
+          typeof outline.seriesSlug === "string" &&
+          SERIES_SLUG_RE.test(outline.seriesSlug) &&
+          Array.isArray(outline.parts) &&
+          outline.parts.length >= 1 &&
+          outline.parts.length <= 6;
+
+        parts = isValidOutline ? outline.parts : [{ part: 1, partTitle: topic, partScope: "" }];
+        seriesTitle = isValidOutline ? outline.seriesTitle : topic;
+        seriesSlug = isValidOutline ? outline.seriesSlug : `masterclass-${taskId.slice(0, 8)}`;
+
+        // Persist the outline on the parent task BEFORE starting the fan-out loop.
+        // If a crash occurs mid-loop, the retry re-enters here, finds seriesOutline,
+        // and reuses it — preventing a different LLM response from generating orphaned children.
+        // Always use "researching" — the task was moved to that status unconditionally
+        // earlier in this handler, so passing existing.Item.status would risk reverting
+        // to a stale value (e.g. "pending" or "failed") if the record was not yet refreshed.
+        await updateTaskStatus(taskId, "researching", {
+          seriesOutline: JSON.stringify({ seriesTitle, seriesSlug, parts })
+        });
+      }
+
+      const totalParts = parts.length;
+
+      console.log(`Task ${taskId} masterclass series: "${seriesTitle}" — ${totalParts} parts (slug: ${seriesSlug})`);
+
+      // Create child tasks and enqueue write jobs BEFORE updating parent status.
+      // If the loop fails mid-way, the parent stays in its current status and SQS retries
+      // will re-enter here. Deterministic child IDs make re-creation idempotent.
+      const docClient = getDocClient();
+      const now = new Date().toISOString();
+      const childTaskIds = [];
+
+      for (const partDef of parts) {
+        // Deterministic child ID: stable across retries for the same parent+part,
+        // so a mid-loop crash followed by an SQS retry writes the same S3 key and
+        // DynamoDB item (idempotent overwrite) rather than creating duplicate children.
+        const childTaskId = createHash("sha256")
+          .update(`${taskId}:part:${partDef.part}`)
+          .digest("hex")
+          .slice(0, 36);
+        childTaskIds.push(childTaskId);
+
+        // Save per-part research to S3: shared research + part scope injected at top
+        const partResearchContent = partDef.partScope
+          ? `## Part ${partDef.part} Scope\n\n${partDef.partScope}\n\n---\n\n${researchContent}`
+          : researchContent;
+        const partS3Key = `research/${childTaskId}.md`;
+        await s3Client.send(
+          new PutObjectCommand({
+            Bucket: process.env.BUCKET_NAME,
+            Key: partS3Key,
+            Body: partResearchContent,
+            ContentType: "text/markdown"
+          })
+        );
+
+        // Create child task record — conditional on the item not already existing.
+        // On an SQS retry after a mid-loop crash, the write job for this part may
+        // already have been picked up and the child may have progressed (e.g. to
+        // "writing" or "drafted"). An unconditional PutCommand would overwrite that
+        // progress back to "researched" and re-queue the write job (below), causing
+        // duplicate pipeline runs. attribute_not_exists(taskId) makes the write a
+        // no-op if the item exists, preserving any progress already made.
+        try {
+          await docClient.send(
+            new PutCommand({
+              TableName: process.env.TABLE_NAME,
+              ConditionExpression: "attribute_not_exists(taskId)",
+              Item: {
+                taskId: childTaskId,
+                parentTaskId: taskId,
+                status: "researched",
+                topic,
+                part: partDef.part,
+                partTitle: partDef.partTitle || `Part ${partDef.part}`,
+                partScope: partDef.partScope || "",
+                seriesTitle,
+                seriesSlug,
+                totalParts,
+                articleType: "masterclass",
+                articleTypeInferred: false,
+                category: resolvedCategory,
+                isNewCategory: partDef.part === 1 ? isNewCategory : false, // only first part triggers new-category site files
+                ...(partDef.part === 1 && newCategoryColor ? { newCategoryColor } : {}),
+                ...(partDef.part === 1 && resolvedCategoryDescription ? { categoryDescription: resolvedCategoryDescription } : {}),
+                s3Key: partS3Key,
+                createdAt: now,
+                updatedAt: now,
+              }
+            })
+          );
+        } catch (putErr) {
+          if (putErr.name === "ConditionalCheckFailedException") {
+            // Child already exists (created on a previous attempt) — skip without
+            // re-enqueuing the write job so we don't duplicate pipeline work.
+            console.log(`Child task ${childTaskId} (part ${partDef.part}) already exists — skipping create and enqueue`);
+            continue;
+          }
+          throw putErr;
+        }
+
+        // Enqueue write job for this part
+        try {
+          if (!process.env.WRITE_QUEUE_URL) {
+            console.error(`WRITE_QUEUE_URL not set — skipping write enqueue for child task ${childTaskId}`);
+          } else {
+            await sendSqsMessage(process.env.WRITE_QUEUE_URL, {
+              taskId: childTaskId,
+              category: resolvedCategory,
+              articleType: "masterclass"
+            });
+            console.log(`Enqueued write job for part ${partDef.part}/${totalParts}: ${childTaskId}`);
+          }
+        } catch (enqueueErr) {
+          console.error(`Research saved but failed to enqueue write job for child ${childTaskId}:`, enqueueErr);
+        }
+      }
+
+      // Update parent task to series_researched only after ALL child tasks are created.
+      // This is the correct placement: a retry that sees series_researched knows the fan-out
+      // is genuinely complete and can skip safely.
+      const parentFields = {
+        s3Key,
+        researchedAt: new Date().toISOString(),
+        category: resolvedCategory,
+        isNewCategory,
+        articleType: resolvedArticleType,
+        articleTypeInferred,
+        seriesTitle,
+        seriesSlug,
+        totalParts,
+      };
+      if (newCategoryColor) parentFields.newCategoryColor = newCategoryColor;
+      if (resolvedCategoryDescription) parentFields.categoryDescription = resolvedCategoryDescription;
+      await updateTaskStatus(taskId, "series_researched", parentFields);
+
+      return { taskId, s3Key, status: "series_researched", seriesSlug, totalParts, childTaskIds };
+    }
+
+    // --- Standard single-post flow ---
 
     // Update task record to researched, persisting category and article type metadata
     const researchedFields = {
