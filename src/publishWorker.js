@@ -434,13 +434,21 @@ module.exports.handler = async (event) => {
 
       // Commit each part's markdown file
       const partSummaries = [];
+      const usedSlugs = new Set(); // track across siblings to prevent silent overwrites
       for (const sibling of sortedSiblings) {
         const postContent = await getS3Object(sibling.finalS3Key);
         const { frontmatter } = parseFrontmatter(postContent);
         const title = frontmatter.title || `Part ${sibling.part}`;
         const SLUG_RE = /^[a-z][a-z0-9-]{0,49}$/;
         const rawSlug = typeof frontmatter.slug === "string" ? frontmatter.slug.trim() : "";
-        const slug = (SLUG_RE.test(rawSlug) ? rawSlug : null) || slugify(title) || `${seriesSlug}-part-${sibling.part}`;
+        let slug = (SLUG_RE.test(rawSlug) ? rawSlug : null) || slugify(title) || `${seriesSlug}-part-${sibling.part}`;
+        // If another part already claimed this slug, fall back to a deterministic unique slug
+        // rather than silently overwriting the earlier part's file in the branch.
+        if (usedSlugs.has(slug)) {
+          slug = `${seriesSlug}-part-${sibling.part}`;
+          console.warn(`Series ${seriesSlug}: slug collision for part ${sibling.part} — using fallback slug "${slug}"`);
+        }
+        usedSlugs.add(slug);
         const filePath = `${BLOG_PATH_PREFIX}/${slug}.md`;
         const encodedContent = Buffer.from(postContent).toString("base64");
 

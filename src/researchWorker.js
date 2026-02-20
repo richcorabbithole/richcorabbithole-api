@@ -387,7 +387,10 @@ Rules:
         // Persist the outline on the parent task BEFORE starting the fan-out loop.
         // If a crash occurs mid-loop, the retry re-enters here, finds seriesOutline,
         // and reuses it — preventing a different LLM response from generating orphaned children.
-        await updateTaskStatus(taskId, existing.Item ? existing.Item.status : "researching", {
+        // Always use "researching" — the task was moved to that status unconditionally
+        // earlier in this handler, so passing existing.Item.status would risk reverting
+        // to a stale value (e.g. "pending" or "failed") if the record was not yet refreshed.
+        await updateTaskStatus(taskId, "researching", {
           seriesOutline: JSON.stringify({ seriesTitle, seriesSlug, parts })
         });
       }

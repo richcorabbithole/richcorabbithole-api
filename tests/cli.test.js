@@ -205,9 +205,10 @@ describe("CLI delete command", () => {
     finalS3Key: "final/task-del.md"
   };
 
-  function setupFakes(taskItem) {
+  function setupFakes(taskItem, children = []) {
     mockSend = mock.fn(async (cmd) => {
       if (cmd.name === "GetCommand") return { Item: taskItem };
+      if (cmd.name === "QueryCommand") return { Items: children };
       return {};
     });
 
@@ -218,7 +219,8 @@ describe("CLI delete command", () => {
       DynamoDBDocumentClient: { from: () => ({ send: (cmd) => mockSend(cmd) }) },
       GetCommand:    class GetCommand    { constructor(p) { this.params = p; this.name = "GetCommand"; } },
       UpdateCommand: class UpdateCommand { constructor(p) { this.params = p; this.name = "UpdateCommand"; } },
-      DeleteCommand: class DeleteCommand { constructor(p) { this.params = p; this.name = "DeleteCommand"; } }
+      DeleteCommand: class DeleteCommand { constructor(p) { this.params = p; this.name = "DeleteCommand"; } },
+      QueryCommand:  class QueryCommand  { constructor(p) { this.params = p; this.name = "QueryCommand"; } }
     });
 
     const sqsPath = require.resolve("@aws-sdk/client-sqs");
@@ -367,6 +369,107 @@ describe("CLI delete command", () => {
   it("exits with code 1 when no taskId is provided", async () => {
     await deleteTaskCommand(undefined);
     assert.strictEqual(exitCode, 1);
+  });
+
+  // --- Series parent cascade ---
+
+  it("cascades delete to child tasks when deleting a series parent", async () => {
+    const PARENT_TASK = {
+      taskId: "parent-id",
+      topic: "rust ownership",
+      status: "series_researched",
+      totalParts: 2,
+      // No parentTaskId — this is the root parent
+      s3Key: "research/parent-id.md",
+    };
+    const CHILD_1 = {
+      taskId: "child-1",
+      parentTaskId: "parent-id",
+      part: 1,
+      s3Key: "research/child-1.md",
+      draftS3Key: "drafts/child-1.md",
+      finalS3Key: "final/child-1.md",
+    };
+    const CHILD_2 = {
+      taskId: "child-2",
+      parentTaskId: "parent-id",
+      part: 2,
+      s3Key: "research/child-2.md",
+    };
+
+    setupFakes(PARENT_TASK, [CHILD_1, CHILD_2]);
+
+    await deleteTaskCommand("parent-id");
+
+    const calls = mockSend.mock.calls.map(c => c.arguments[0]);
+
+    // Must query children via GSI
+    const queryCalls = calls.filter(c => c.name === "QueryCommand");
+    assert.strictEqual(queryCalls.length, 1, "Expected one QueryCommand for children");
+    assert.strictEqual(queryCalls[0].params.ExpressionAttributeValues[":pid"], "parent-id");
+
+    // All child S3 keys deleted
+    const s3Deletes = calls.filter(c => c.name === "DeleteObjectCommand");
+    const deletedKeys = s3Deletes.map(c => c.params.Key);
+    assert.ok(deletedKeys.includes("research/child-1.md"),  "child-1 research deleted");
+    assert.ok(deletedKeys.includes("drafts/child-1.md"),    "child-1 draft deleted");
+    assert.ok(deletedKeys.includes("final/child-1.md"),     "child-1 final deleted");
+    assert.ok(deletedKeys.includes("research/child-2.md"),  "child-2 research deleted");
+    assert.ok(deletedKeys.includes("research/parent-id.md"), "parent research deleted");
+
+    // Both child DynamoDB items deleted
+    const dbDeletes = calls.filter(c => c.name === "DeleteCommand");
+    const deletedTaskIds = dbDeletes.map(c => c.params.Key.taskId);
+    assert.ok(deletedTaskIds.includes("child-1"), "child-1 DynamoDB item deleted");
+    assert.ok(deletedTaskIds.includes("child-2"), "child-2 DynamoDB item deleted");
+    assert.ok(deletedTaskIds.includes("parent-id"), "parent DynamoDB item deleted");
+  });
+
+  it("deletes parent last (after all children) when cascading", async () => {
+    const PARENT_TASK = {
+      taskId: "parent-id",
+      status: "series_researched",
+      totalParts: 1,
+      s3Key: "research/parent-id.md",
+    };
+    const CHILD_1 = { taskId: "child-1", parentTaskId: "parent-id", part: 1 };
+
+    setupFakes(PARENT_TASK, [CHILD_1]);
+
+    await deleteTaskCommand("parent-id");
+
+    const calls = mockSend.mock.calls.map(c => c.arguments[0]);
+    const dbDeletes = calls.filter(c => c.name === "DeleteCommand");
+
+    // Parent must be the last DynamoDB delete
+    assert.ok(dbDeletes.length >= 2, "Expected at least 2 DeleteCommands (child + parent)");
+    const last = dbDeletes[dbDeletes.length - 1];
+    assert.strictEqual(last.params.Key.taskId, "parent-id", "Parent DynamoDB item must be deleted last");
+  });
+
+  it("does not query for children when deleting a standard (non-series) task", async () => {
+    // FULL_TASK has no totalParts — should not trigger a GSI query
+    await deleteTaskCommand("task-del");
+
+    const calls = mockSend.mock.calls.map(c => c.arguments[0]);
+    const queryCalls = calls.filter(c => c.name === "QueryCommand");
+    assert.strictEqual(queryCalls.length, 0, "No QueryCommand for standard (non-series) task");
+  });
+
+  it("does not query for children when deleting a series child task (has parentTaskId)", async () => {
+    setupFakes({
+      taskId: "child-x",
+      parentTaskId: "some-parent",
+      part: 1,
+      totalParts: 3,
+      s3Key: "research/child-x.md",
+    });
+
+    await deleteTaskCommand("child-x");
+
+    const calls = mockSend.mock.calls.map(c => c.arguments[0]);
+    const queryCalls = calls.filter(c => c.name === "QueryCommand");
+    assert.strictEqual(queryCalls.length, 0, "No QueryCommand when deleting a child task (parentTaskId is set)");
   });
 });
 

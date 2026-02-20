@@ -425,7 +425,35 @@ describe("researchWorker handler", () => {
       );
     });
 
-    it("persists seriesOutline to parent task before fan-out loop (Bug 2 — stable across retries)", async () => {
+    it("outline persist UpdateCommand always uses status 'researching', never the stale pre-update value (Bug 1)", async () => {
+      // The task record may have status "pending" or "failed" at the time existing.Item is read
+      // (before the updateTaskStatus("researching") call runs). The seriesOutline persist must
+      // always write "researching" — not existing.Item.status — to avoid reverting the status.
+      mockSend.mock.mockImplementation(async (cmd) => {
+        if (cmd.name === "GetCommand") {
+          // Return a task with a stale status to make the regression visible
+          return { Item: { taskId: "t1", status: "pending" } };
+        }
+        if (cmd.name === "GetSecretValueCommand") {
+          return { SecretString: "sk-ant-test-key" };
+        }
+        return {};
+      });
+
+      await handler(sqsEvent({ taskId: "t1", topic: "rust ownership", articleType: "masterclass" }));
+
+      const updateCalls = mockSend.mock.calls.filter(c => c.arguments[0].name === "UpdateCommand");
+      const outlineUpdate = updateCalls.find(c =>
+        c.arguments[0].params.ExpressionAttributeValues[":seriesOutline"] !== undefined
+      );
+      assert.ok(outlineUpdate, "Expected an UpdateCommand persisting seriesOutline");
+
+      const writtenStatus = outlineUpdate.arguments[0].params.ExpressionAttributeValues[":status"];
+      assert.strictEqual(writtenStatus, "researching",
+        `seriesOutline persist must write status "researching", got "${writtenStatus}"`);
+    });
+
+    it("persists seriesOutline to parent task before fan-out loop (stable across retries)", async () => {
       // The outline must be written to DynamoDB before any child PutCommand fires.
       // This guarantees that if the loop crashes mid-way, a retry can read the stored
       // outline and reuse it rather than calling Claude again (which could produce a

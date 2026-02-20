@@ -217,7 +217,7 @@ Prints a table of part number, title, and pipeline status for all sibling tasks 
 node scripts/cli.js delete <taskId> --stage dev --profile richcorabbithole
 ```
 
-Removes all S3 objects associated with the task (`research/`, `drafts/`, `edited/`, `final/`) then deletes the DynamoDB item. S3 objects are deleted first so the record is never orphaned without its files.
+Removes all S3 objects associated with the task (`research/`, `drafts/`, `edited/`, `final/`) then deletes the DynamoDB item. S3 objects are deleted first so the record is never orphaned without its files. For masterclass parent tasks, all child tasks are cascaded through first (S3 + DynamoDB) before the parent is removed.
 
 ### Flags
 

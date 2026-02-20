@@ -981,5 +981,37 @@ draft: true
       );
       assert.ok(waitingUpdate, "Expected UpdateCommand to persist waiting_for_siblings status");
     });
+
+    it("uses unique fallback slugs when two parts produce the same slug (Bug 2)", async () => {
+      // Both parts return the same SAMPLE_POST (same title → same slug after slugify).
+      // The second part must receive a deterministic fallback slug rather than overwriting
+      // the first part's file in the branch.
+      mockSend.mock.mockImplementation(makeSeriesMockSend(true));
+
+      const httpsCalls = [];
+      githubRoutes = (method, path, requestBody) => {
+        httpsCalls.push({ method, path, requestBody });
+        return defaultGitHubRoutes(method, path, requestBody);
+      };
+
+      await handler(sqsEvent({ taskId: "t1" }));
+
+      const putCalls = httpsCalls.filter(c => c.method === "PUT" && c.path.includes("/contents/"));
+      assert.strictEqual(putCalls.length, 2, "Should commit two separate files");
+
+      // Extract the file paths from the PUT URLs
+      const filePaths = putCalls.map(c => {
+        // path is like /repos/owner/repo/contents/blog/src/content/blog/some-slug.md
+        return c.path.split("/contents/")[1];
+      });
+
+      // Both paths must be distinct — no silent overwrite of the same file
+      assert.notStrictEqual(filePaths[0], filePaths[1],
+        `Both parts committed to the same path "${filePaths[0]}" — slug collision not resolved`);
+
+      // The second path must use the deterministic fallback pattern ${seriesSlug}-part-N
+      const fallbackPath = filePaths.find(p => p.includes("rust-ownership-part-"));
+      assert.ok(fallbackPath, `Expected a fallback slug path containing "rust-ownership-part-", got: ${filePaths}`);
+    });
   });
 });

@@ -734,8 +734,12 @@ async function setApprovalCommand(taskId, decision) {
 /**
  * delete <taskId> — Delete a task record from DynamoDB and all affiliated S3 objects.
  *
- * Collects every S3 key stored on the task record (s3Key, draftS3Key, editedS3Key,
- * finalS3Key), deletes each one, then removes the DynamoDB item.
+ * For standard tasks: collects every S3 key stored on the record (s3Key, draftS3Key,
+ * editedS3Key, finalS3Key), deletes each one, then removes the DynamoDB item.
+ *
+ * For masterclass parent tasks (identified by having totalParts but no parentTaskId):
+ * first cascades through all child tasks via the parentTaskId-index GSI, deleting each
+ * child's S3 objects and DynamoDB item, then deletes the parent.
  *
  * @param {string} taskId
  */
@@ -745,9 +749,12 @@ async function deleteTaskCommand(taskId) {
     process.exit(1);
   }
 
+  const { QueryCommand: DynamoQueryCommand } = require("@aws-sdk/lib-dynamodb");
+
   const clientConfig = makeClientConfig();
   const dynamoClient = new DynamoDBClient(clientConfig);
   const docClient = DynamoDBDocumentClient.from(dynamoClient);
+  const s3Client = new S3Client(clientConfig);
 
   // Fetch the task to discover which S3 keys exist
   const taskResult = await docClient.send(
@@ -764,26 +771,48 @@ async function deleteTaskCommand(taskId) {
   console.log(`🗑️  Deleting task ${taskId} (status: ${task.status})`);
   if (task.topic) console.log(`   Topic: ${task.topic}`);
 
-  // Collect all S3 keys present on this task record
-  const s3Keys = [task.s3Key, task.draftS3Key, task.editedS3Key, task.finalS3Key].filter(Boolean);
-
-  // Delete each S3 object
-  const s3Client = new S3Client(clientConfig);
-  for (const key of s3Keys) {
-    await s3Client.send(
-      new DeleteObjectCommand({ Bucket: BUCKET_NAME, Key: key })
+  /**
+   * Delete all S3 objects for a single task record, then remove the DynamoDB item.
+   * @param {object} item - DynamoDB task record
+   */
+  async function deleteTaskItem(item) {
+    const keys = [item.s3Key, item.draftS3Key, item.editedS3Key, item.finalS3Key].filter(Boolean);
+    for (const key of keys) {
+      await s3Client.send(
+        new DeleteObjectCommand({ Bucket: BUCKET_NAME, Key: key })
+      );
+      console.log(`   ✓ Deleted S3 object: ${key}`);
+    }
+    if (keys.length === 0) {
+      console.log(`   (no S3 objects for ${item.taskId})`);
+    }
+    await docClient.send(
+      new DeleteCommand({ TableName: TABLE_NAME, Key: { taskId: item.taskId } })
     );
-    console.log(`   ✓ Deleted S3 object: ${key}`);
   }
 
-  if (s3Keys.length === 0) {
-    console.log(`   (no S3 objects found)`);
+  // If this is a masterclass parent task (has totalParts, no parentTaskId), cascade to children
+  const isSeriesParent = task.totalParts && !task.parentTaskId;
+  if (isSeriesParent) {
+    console.log(`   Series parent detected (${task.totalParts} parts) — cascading to children`);
+    const childResult = await docClient.send(
+      new DynamoQueryCommand({
+        TableName: TABLE_NAME,
+        IndexName: "parentTaskId-index",
+        KeyConditionExpression: "parentTaskId = :pid",
+        ExpressionAttributeValues: { ":pid": taskId },
+      })
+    );
+    const children = childResult.Items || [];
+    console.log(`   Found ${children.length} child task(s)`);
+    for (const child of children) {
+      console.log(`   → Deleting child ${child.taskId} (part ${child.part || "?"})`);
+      await deleteTaskItem(child);
+    }
   }
 
-  // Delete the DynamoDB item
-  await docClient.send(
-    new DeleteCommand({ TableName: TABLE_NAME, Key: { taskId } })
-  );
+  // Delete the root task itself (parent or standalone)
+  await deleteTaskItem(task);
 
   console.log(`✅ Task ${taskId} deleted`);
 }
