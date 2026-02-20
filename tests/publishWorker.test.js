@@ -843,5 +843,45 @@ draft: true
       // GitHub should have been called (branch, commits, PR)
       assert.ok(mockHttpsRequest.mock.callCount() > 0, "Expected GitHub API calls to proceed");
     });
+
+    it("throws to trigger SQS retry when GSI returns fewer siblings than totalParts", async () => {
+      // Simulate GSI eventual-consistency lag: only 1 of 2 siblings indexed
+      mockSend.mock.mockImplementation(async (cmd) => {
+        if (cmd.name === "GetCommand") {
+          const key = cmd.params?.Key?.taskId;
+          if (key === "t1") return { Item: CHILD_TASK }; // CHILD_TASK.totalParts === 2
+          if (key === "parent-uuid") return { Item: PARENT_TASK };
+          return {};
+        }
+        if (cmd.name === "QueryCommand") {
+          // Only one sibling returned — GSI has not indexed the second yet
+          return { Items: [{ ...CHILD_TASK }] };
+        }
+        return {};
+      });
+
+      await assert.rejects(
+        () => handler(sqsEvent({ taskId: "t1" })),
+        /GSI returned 1\/2 siblings/
+      );
+      // No GitHub API calls should have been made
+      assert.strictEqual(mockHttpsRequest.mock.callCount(), 0);
+    });
+
+    it("persists waiting_for_siblings to DynamoDB when siblings are not all ready", async () => {
+      // makeSeriesMockSend(false) returns 2 siblings with one in "editing" (count === totalParts,
+      // but not all ready) — so the count guard passes, allReady is false
+      mockSend.mock.mockImplementation(makeSeriesMockSend(false));
+
+      const result = await handler(sqsEvent({ taskId: "t1" }));
+      assert.strictEqual(result.status, "waiting_for_siblings");
+
+      // Must have updated DynamoDB to persist the status
+      const updateCalls = mockSend.mock.calls.filter(c => c.arguments[0].name === "UpdateCommand");
+      const waitingUpdate = updateCalls.find(c =>
+        c.arguments[0].params.ExpressionAttributeValues[":status"] === "waiting_for_siblings"
+      );
+      assert.ok(waitingUpdate, "Expected UpdateCommand to persist waiting_for_siblings status");
+    });
   });
 });

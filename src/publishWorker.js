@@ -309,13 +309,27 @@ module.exports.handler = async (event) => {
     // proceed to create the PR; earlier arrivals exit cleanly (message is consumed, not retried).
     if (task.parentTaskId) {
       const siblings = await getChildTasks(docClient, process.env.TABLE_NAME, task.parentTaskId);
-      const allReady = siblings.length > 0 && siblings.every(s => s.status === "ready" || s.status === "published");
+      const expectedTotal = task.totalParts;
+
+      // Guard against eventual-consistency GSI lag: if the GSI has not yet indexed all
+      // child records, a PR created now would be missing parts. Throw to trigger SQS retry
+      // (up to maxReceiveCount, then DLQ) — consistency lag is typically milliseconds.
+      if (siblings.length < expectedTotal) {
+        throw new Error(
+          `Series ${task.parentTaskId}: GSI returned ${siblings.length}/${expectedTotal} siblings — retrying for consistency`
+        );
+      }
+
+      // "waiting_for_siblings" counts as ready-enough: the task has completed all pipeline
+      // stages and already persisted that status in a prior publishWorker invocation.
+      const READY_STATUSES = new Set(["ready", "waiting_for_siblings", "published"]);
+      const allReady = siblings.every(s => READY_STATUSES.has(s.status));
 
       if (!allReady) {
-        const readyCount = siblings.filter(s => s.status === "ready" || s.status === "published").length;
-        console.log(`Series task ${taskId}: ${readyCount}/${siblings.length} parts ready — waiting for remaining parts`);
-        // Return without error — SQS deletes the message. The finalS3Key is already saved.
-        // The last sibling to arrive will trigger the PR creation.
+        const readyCount = siblings.filter(s => READY_STATUSES.has(s.status)).length;
+        console.log(`Series task ${taskId}: ${readyCount}/${siblings.length} parts ready — persisting waiting_for_siblings`);
+        // Persist status so CLI series-status reflects accurate progress.
+        await updateTaskStatus(taskId, "waiting_for_siblings", { waitedAt: new Date().toISOString() });
         return { taskId, status: "waiting_for_siblings" };
       }
 

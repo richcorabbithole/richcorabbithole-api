@@ -661,6 +661,7 @@ async function seriesStatusCommand(taskId) {
     edited: "✅",
     optimizing: "🔍",
     ready: "🚀",
+    waiting_for_siblings: "🔄",
     publishing: "📬",
     published: "✅",
     failed: "❌",
