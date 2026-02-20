@@ -400,5 +400,29 @@ describe("researchWorker handler", () => {
         assert.strictEqual(partS3Put.arguments[0].params.Key, `research/${expectedId}.md`);
       }
     });
+
+    it("updates parent to series_researched only after all children are created", async () => {
+      // This verifies the safe ordering: child PutCommands must all precede the
+      // series_researched UpdateCommand so a mid-loop crash leaves the parent in
+      // "researching" and allows a retry to complete the fan-out.
+      await handler(sqsEvent({ taskId: "t1", topic: "rust ownership", articleType: "masterclass" }));
+
+      const allCalls = mockSend.mock.calls;
+      const putIndices = allCalls
+        .map((c, i) => c.arguments[0].name === "PutCommand" ? i : -1)
+        .filter(i => i >= 0);
+      const seriesUpdateIndex = allCalls.findIndex(c =>
+        c.arguments[0].name === "UpdateCommand" &&
+        c.arguments[0].params.ExpressionAttributeValues[":status"] === "series_researched"
+      );
+
+      assert.ok(seriesUpdateIndex > -1, "Expected series_researched UpdateCommand");
+      assert.strictEqual(putIndices.length, 3, "Expected 3 child PutCommands");
+      const lastPutIndex = putIndices[putIndices.length - 1];
+      assert.ok(
+        seriesUpdateIndex > lastPutIndex,
+        `series_researched update (call ${seriesUpdateIndex}) must come after last PutCommand (call ${lastPutIndex})`
+      );
+    });
   });
 });

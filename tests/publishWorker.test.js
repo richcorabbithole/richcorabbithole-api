@@ -800,5 +800,48 @@ draft: true
       // No GitHub API calls
       assert.strictEqual(mockHttpsRequest.mock.callCount(), 0);
     });
+
+    it("resumes and completes publish when parent is stalled in publishing state", async () => {
+      // Simulate a previous attempt that claimed the publishing lock but failed before
+      // completing the GitHub operations. On retry the conditional update will throw
+      // ConditionalCheckFailedException, but the handler should re-fetch the parent,
+      // see "publishing", and fall through to the GitHub operations (which are idempotent).
+      mockSend.mock.mockImplementation(async (cmd) => {
+        if (cmd.name === "GetCommand") {
+          const key = cmd.params?.Key?.taskId;
+          if (key === "t1") return { Item: CHILD_TASK };
+          // Always return "publishing" for the parent (both initial check and re-fetch)
+          if (key === "parent-uuid") return { Item: { ...PARENT_TASK, status: "publishing" } };
+          return {};
+        }
+        if (cmd.name === "QueryCommand") {
+          return { Items: [{ ...CHILD_TASK }, { ...SIBLING_TASK }] };
+        }
+        if (cmd.name === "UpdateCommand") {
+          // Fail only the conditional lock-claim update; let plain updates succeed
+          if (cmd.params?.ConditionExpression) {
+            const err = new Error("The conditional request failed");
+            err.name = "ConditionalCheckFailedException";
+            throw err;
+          }
+          return {};
+        }
+        if (cmd.name === "GetSecretValueCommand") {
+          return { SecretString: JSON.stringify({ appId: "12345", installationId: "67890", privateKey: "-----BEGIN RSA PRIVATE KEY-----\nfake-key\n-----END RSA PRIVATE KEY-----" }) };
+        }
+        if (cmd.name === "GetObjectCommand") {
+          return { Body: { transformToString: async () => SAMPLE_POST } };
+        }
+        return {};
+      });
+
+      const result = await handler(sqsEvent({ taskId: "t1" }));
+
+      // Should complete publishing, not return waiting_for_siblings
+      assert.strictEqual(result.status, "published");
+
+      // GitHub should have been called (branch, commits, PR)
+      assert.ok(mockHttpsRequest.mock.callCount() > 0, "Expected GitHub API calls to proceed");
+    });
   });
 });

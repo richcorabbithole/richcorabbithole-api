@@ -357,23 +357,9 @@ Rules:
 
       console.log(`Task ${taskId} masterclass series: "${seriesTitle}" — ${totalParts} parts (slug: ${seriesSlug})`);
 
-      // Update parent task to series_researched
-      const parentFields = {
-        s3Key,
-        researchedAt: new Date().toISOString(),
-        category: resolvedCategory,
-        isNewCategory,
-        articleType: resolvedArticleType,
-        articleTypeInferred,
-        seriesTitle,
-        seriesSlug,
-        totalParts,
-      };
-      if (newCategoryColor) parentFields.newCategoryColor = newCategoryColor;
-      if (resolvedCategoryDescription) parentFields.categoryDescription = resolvedCategoryDescription;
-      await updateTaskStatus(taskId, "series_researched", parentFields);
-
-      // Create child tasks and enqueue write jobs
+      // Create child tasks and enqueue write jobs BEFORE updating parent status.
+      // If the loop fails mid-way, the parent stays "researching" and SQS retries
+      // will re-enter here. Deterministic child IDs make re-creation idempotent.
       const docClient = getDocClient();
       const now = new Date().toISOString();
       const childTaskIds = [];
@@ -446,6 +432,24 @@ Rules:
           console.error(`Research saved but failed to enqueue write job for child ${childTaskId}:`, enqueueErr);
         }
       }
+
+      // Update parent task to series_researched only after ALL child tasks are created.
+      // This is the correct placement: a retry that sees series_researched knows the fan-out
+      // is genuinely complete and can skip safely.
+      const parentFields = {
+        s3Key,
+        researchedAt: new Date().toISOString(),
+        category: resolvedCategory,
+        isNewCategory,
+        articleType: resolvedArticleType,
+        articleTypeInferred,
+        seriesTitle,
+        seriesSlug,
+        totalParts,
+      };
+      if (newCategoryColor) parentFields.newCategoryColor = newCategoryColor;
+      if (resolvedCategoryDescription) parentFields.categoryDescription = resolvedCategoryDescription;
+      await updateTaskStatus(taskId, "series_researched", parentFields);
 
       return { taskId, s3Key, status: "series_researched", seriesSlug, totalParts, childTaskIds };
     }

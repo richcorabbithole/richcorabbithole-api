@@ -348,10 +348,30 @@ module.exports.handler = async (event) => {
         );
       } catch (condErr) {
         if (condErr.name === "ConditionalCheckFailedException") {
-          console.log(`Series parent ${task.parentTaskId} already being published by another sibling — skipping`);
-          return { taskId, status: "waiting_for_siblings" };
+          // Re-fetch parent to distinguish two cases:
+          // 1. Parent is "published" → another sibling completed the PR, we're done.
+          // 2. Parent is "publishing" → a previous attempt claimed the lock but failed
+          //    mid-way (GitHub error, S3 read error, etc.). Treat the existing lock as
+          //    ours and fall through to the GitHub operations — they're all idempotent.
+          const recheck = await docClient.send(
+            new GetCommand({ TableName: process.env.TABLE_NAME, Key: { taskId: task.parentTaskId } })
+          );
+          const recheckParent = recheck.Item;
+          if (recheckParent && recheckParent.status === "published") {
+            console.log(`Series parent ${task.parentTaskId} already published — marking child ${taskId} published`);
+            await updateTaskStatus(taskId, "published", { publishedAt: new Date().toISOString(), prUrl: recheckParent.prUrl, prNumber: recheckParent.prNumber, branchName: recheckParent.branchName });
+            return { taskId, status: "already_published" };
+          }
+          if (recheckParent && recheckParent.status === "publishing") {
+            console.log(`Series parent ${task.parentTaskId} is stalled in publishing — resuming`);
+            // Fall through to the GitHub operations below
+          } else {
+            console.log(`Series parent ${task.parentTaskId} already being published by another sibling — skipping`);
+            return { taskId, status: "waiting_for_siblings" };
+          }
+        } else {
+          throw condErr;
         }
-        throw condErr;
       }
 
       // Sort siblings by part number, collect their final posts
