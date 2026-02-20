@@ -665,4 +665,140 @@ draft: true
       );
     });
   });
+
+  // --- Masterclass series publishing ---
+
+  describe("masterclass series publishing", () => {
+    const CHILD_TASK = {
+      taskId: "t1",
+      parentTaskId: "parent-uuid",
+      status: "ready",
+      finalS3Key: "final/t1.md",
+      seriesSlug: "rust-ownership",
+      seriesTitle: "The Complete Guide to Rust Ownership",
+      part: 1,
+      totalParts: 2,
+      category: "tech",
+      isNewCategory: false,
+    };
+
+    const SIBLING_TASK = {
+      taskId: "t2",
+      parentTaskId: "parent-uuid",
+      status: "ready",
+      finalS3Key: "final/t2.md",
+      seriesSlug: "rust-ownership",
+      seriesTitle: "The Complete Guide to Rust Ownership",
+      part: 2,
+      totalParts: 2,
+      category: "tech",
+      isNewCategory: false,
+    };
+
+    const PARENT_TASK = {
+      taskId: "parent-uuid",
+      status: "series_researched",
+      seriesSlug: "rust-ownership",
+      seriesTitle: "The Complete Guide to Rust Ownership",
+      totalParts: 2,
+    };
+
+    function makeSeriesMockSend(allReady = true, parentAlreadyPublished = false) {
+      return async (cmd) => {
+        if (cmd.name === "GetCommand") {
+          const key = cmd.params?.Key?.taskId;
+          if (key === "t1") return { Item: CHILD_TASK };
+          if (key === "parent-uuid") {
+            if (parentAlreadyPublished) return { Item: { ...PARENT_TASK, status: "published", prUrl: "https://github.com/pr/99", prNumber: 99, branchName: "series/rust-ownership" } };
+            return { Item: PARENT_TASK };
+          }
+          return {};
+        }
+        if (cmd.name === "QueryCommand") {
+          // Sibling query
+          const siblings = allReady
+            ? [{ ...CHILD_TASK }, { ...SIBLING_TASK }]
+            : [{ ...CHILD_TASK }, { ...SIBLING_TASK, status: "editing" }];
+          return { Items: siblings };
+        }
+        if (cmd.name === "GetSecretValueCommand") {
+          return { SecretString: JSON.stringify({ appId: "12345", installationId: "67890", privateKey: "-----BEGIN RSA PRIVATE KEY-----\nfake-key\n-----END RSA PRIVATE KEY-----" }) };
+        }
+        if (cmd.name === "GetObjectCommand") {
+          return { Body: { transformToString: async () => SAMPLE_POST } };
+        }
+        return {};
+      };
+    }
+
+    it("returns waiting_for_siblings when not all parts are ready", async () => {
+      mockSend.mock.mockImplementation(makeSeriesMockSend(false));
+
+      const result = await handler(sqsEvent({ taskId: "t1" }));
+      assert.strictEqual(result.status, "waiting_for_siblings");
+
+      // No GitHub calls should have been made
+      assert.strictEqual(mockHttpsRequest.mock.callCount(), 0);
+    });
+
+    it("creates series PR on series/ branch when all parts ready", async () => {
+      mockSend.mock.mockImplementation(makeSeriesMockSend(true));
+
+      const httpsCalls = [];
+      githubRoutes = (method, path, requestBody) => {
+        httpsCalls.push({ method, path, requestBody });
+        return defaultGitHubRoutes(method, path, requestBody);
+      };
+
+      const result = await handler(sqsEvent({ taskId: "t1" }));
+      assert.strictEqual(result.status, "published");
+
+      const branchCall = httpsCalls.find(c => c.method === "POST" && c.path.includes("/git/refs"));
+      assert.ok(branchCall, "Expected branch creation");
+      const branchBody = JSON.parse(branchCall.requestBody);
+      assert.ok(branchBody.ref.includes("series/rust-ownership"), "Branch should be series/");
+
+      const prCall = httpsCalls.find(c => c.method === "POST" && c.path.includes("/pulls"));
+      assert.ok(prCall, "Expected PR creation");
+      const prBody = JSON.parse(prCall.requestBody);
+      assert.ok(prBody.title.includes("The Complete Guide to Rust Ownership"), "PR title should include series title");
+    });
+
+    it("commits both part files to the series branch", async () => {
+      mockSend.mock.mockImplementation(makeSeriesMockSend(true));
+
+      const httpsCalls = [];
+      githubRoutes = (method, path, requestBody) => {
+        httpsCalls.push({ method, path, requestBody });
+        return defaultGitHubRoutes(method, path, requestBody);
+      };
+
+      await handler(sqsEvent({ taskId: "t1" }));
+
+      const putCalls = httpsCalls.filter(c => c.method === "PUT" && c.path.includes("/contents/"));
+      assert.strictEqual(putCalls.length, 2, "Should commit one file per part");
+    });
+
+    it("marks parent task and all child tasks as published", async () => {
+      mockSend.mock.mockImplementation(makeSeriesMockSend(true));
+
+      await handler(sqsEvent({ taskId: "t1" }));
+
+      const updateCalls = mockSend.mock.calls.filter(c => c.arguments[0].name === "UpdateCommand");
+      const publishedUpdates = updateCalls.filter(
+        c => c.arguments[0].params.ExpressionAttributeValues[":status"] === "published"
+      );
+      // Parent + 2 children = 3 published updates
+      assert.ok(publishedUpdates.length >= 3, `Expected ≥3 published updates, got ${publishedUpdates.length}`);
+    });
+
+    it("returns already_published when parent task is already published", async () => {
+      mockSend.mock.mockImplementation(makeSeriesMockSend(true, true));
+
+      const result = await handler(sqsEvent({ taskId: "t1" }));
+      assert.strictEqual(result.status, "already_published");
+      // No GitHub API calls
+      assert.strictEqual(mockHttpsRequest.mock.callCount(), 0);
+    });
+  });
 });

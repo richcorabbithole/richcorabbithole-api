@@ -463,4 +463,59 @@ describe("writeWorker handler", () => {
       );
     });
   });
+
+  // --- Series child task ---
+
+  describe("series child task", () => {
+    beforeEach(() => {
+      mockSend.mock.mockImplementation(async (cmd) => {
+        if (cmd.name === "GetCommand") {
+          return {
+            Item: {
+              taskId: "t1",
+              status: "researched",
+              s3Key: "research/t1.md",
+              category: "tech",
+              articleType: "masterclass",
+              parentTaskId: "parent-uuid",
+              seriesSlug: "rust-ownership",
+              seriesTitle: "The Complete Guide to Rust Ownership",
+              part: 2,
+              totalParts: 3,
+            }
+          };
+        }
+        if (cmd.name === "GetSecretValueCommand") {
+          return { SecretString: "sk-ant-test-key" };
+        }
+        if (cmd.name === "GetObjectCommand") {
+          return { Body: { transformToString: async () => "## Part 2 Scope\n\nBorrowing basics.\n\n---\n\n# Research\n\nContent." } };
+        }
+        return {};
+      });
+    });
+
+    it("includes seriesSlug in the system prompt for a series child task", async () => {
+      await handler(sqsEvent({ taskId: "t1" }));
+
+      const callArgs = mockCreate.mock.calls[0].arguments[0];
+      assert.ok(callArgs.system.includes("rust-ownership"), "System prompt should include seriesSlug");
+      assert.ok(callArgs.system.includes("Part 2 of 3"), "System prompt should include part info");
+    });
+
+    it("includes seriesTitle in the system prompt for a series child task", async () => {
+      await handler(sqsEvent({ taskId: "t1" }));
+
+      const callArgs = mockCreate.mock.calls[0].arguments[0];
+      assert.ok(callArgs.system.includes("The Complete Guide to Rust Ownership"), "System prompt should include seriesTitle");
+    });
+
+    it("drafts successfully and enqueues edit job", async () => {
+      const result = await handler(sqsEvent({ taskId: "t1" }));
+      assert.strictEqual(result.status, "drafted");
+
+      const sendCall = mockSend.mock.calls.find(c => c.arguments[0].name === "SendMessageCommand");
+      assert.ok(sendCall, "Expected edit job to be enqueued");
+    });
+  });
 });

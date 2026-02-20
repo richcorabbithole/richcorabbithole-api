@@ -246,4 +246,115 @@ describe("researchWorker handler", () => {
       );
     });
   });
+
+  // --- Masterclass series fan-out ---
+
+  describe("masterclass series fan-out", () => {
+    const SERIES_OUTLINE = JSON.stringify({
+      seriesTitle: "The Complete Guide to Rust Ownership",
+      seriesSlug: "rust-ownership",
+      parts: [
+        { part: 1, partTitle: "What is Ownership?", partScope: "Foundations of ownership." },
+        { part: 2, partTitle: "Borrowing and Lifetimes", partScope: "Borrow checker basics." },
+        { part: 3, partTitle: "Advanced Patterns", partScope: "Advanced usage." }
+      ]
+    });
+
+    beforeEach(() => {
+      // Tests pass articleType: "masterclass" directly, so type inference is skipped.
+      // Call order: 1=research, 2=category, 3=series outline (3 total, not 4)
+      let claudeCallCount = 0;
+      mockCreate.mock.mockImplementation(async () => {
+        claudeCallCount++;
+        if (claudeCallCount === 1) {
+          // research call
+          return { content: [{ type: "text", text: "# Research\n\nRust ownership is fundamental." }] };
+        }
+        if (claudeCallCount === 2) {
+          // category call
+          return { content: [{ type: "text", text: JSON.stringify({ scores: { tech: 0.9 }, proposed: null }) }] };
+        }
+        if (claudeCallCount === 3) {
+          // series outline
+          return { content: [{ type: "text", text: SERIES_OUTLINE }] };
+        }
+        return { content: [{ type: "text", text: "" }] };
+      });
+    });
+
+    it("returns series_researched status for masterclass articleType", async () => {
+      const result = await handler(sqsEvent({ taskId: "t1", topic: "rust ownership", articleType: "masterclass" }));
+      assert.strictEqual(result.status, "series_researched");
+      assert.strictEqual(result.seriesSlug, "rust-ownership");
+      assert.strictEqual(result.totalParts, 3);
+    });
+
+    it("creates one child task per part in DynamoDB", async () => {
+      await handler(sqsEvent({ taskId: "t1", topic: "rust ownership", articleType: "masterclass" }));
+
+      const putCalls = mockSend.mock.calls.filter(c => c.arguments[0].name === "PutCommand");
+      assert.strictEqual(putCalls.length, 3, "Expected one PutCommand per series part");
+
+      const firstPut = putCalls[0].arguments[0].params.Item;
+      assert.strictEqual(firstPut.parentTaskId, "t1");
+      assert.strictEqual(firstPut.part, 1);
+      assert.strictEqual(firstPut.seriesSlug, "rust-ownership");
+      assert.strictEqual(firstPut.articleType, "masterclass");
+      assert.strictEqual(firstPut.status, "researched");
+    });
+
+    it("enqueues one write job per part to the WriteQueue", async () => {
+      await handler(sqsEvent({ taskId: "t1", topic: "rust ownership", articleType: "masterclass" }));
+
+      const sqsCalls = mockSend.mock.calls.filter(c => c.arguments[0].name === "SendMessageCommand");
+      assert.strictEqual(sqsCalls.length, 3, "Expected one SQS message per series part");
+
+      for (const call of sqsCalls) {
+        const body = JSON.parse(call.arguments[0].params.MessageBody);
+        assert.ok(body.taskId, "Each write job should have a taskId");
+        assert.strictEqual(body.articleType, "masterclass");
+      }
+    });
+
+    it("saves per-part research to S3 with part scope prepended", async () => {
+      await handler(sqsEvent({ taskId: "t1", topic: "rust ownership", articleType: "masterclass" }));
+
+      const s3Puts = mockSend.mock.calls.filter(c => c.arguments[0].name === "PutObjectCommand");
+      // First PutObjectCommand is the shared research; subsequent ones are per-part
+      assert.ok(s3Puts.length >= 4, "Expected 1 shared + 3 per-part S3 writes");
+
+      const partPut = s3Puts[1]; // first child part
+      assert.ok(partPut.arguments[0].params.Body.includes("Part 1 Scope"), "Per-part research should include scope header");
+    });
+
+    it("updates parent task to series_researched with series metadata", async () => {
+      await handler(sqsEvent({ taskId: "t1", topic: "rust ownership", articleType: "masterclass" }));
+
+      const updateCalls = mockSend.mock.calls.filter(c => c.arguments[0].name === "UpdateCommand");
+      const seriesUpdate = updateCalls.find(c =>
+        c.arguments[0].params.ExpressionAttributeValues[":status"] === "series_researched"
+      );
+      assert.ok(seriesUpdate, "Expected series_researched status update");
+
+      const vals = seriesUpdate.arguments[0].params.ExpressionAttributeValues;
+      assert.strictEqual(vals[":seriesSlug"], "rust-ownership");
+      assert.strictEqual(vals[":totalParts"], 3);
+    });
+
+    it("falls back to single-part series when outline JSON is invalid", async () => {
+      // articleType: "masterclass" is provided → no type inference → 3 Claude calls
+      let claudeCallCount = 0;
+      mockCreate.mock.mockImplementation(async () => {
+        claudeCallCount++;
+        if (claudeCallCount === 1) return { content: [{ type: "text", text: "# Research\n\nContent." }] };
+        if (claudeCallCount === 2) return { content: [{ type: "text", text: JSON.stringify({ scores: { tech: 0.9 }, proposed: null }) }] };
+        // outline call returns invalid JSON → triggers fallback
+        return { content: [{ type: "text", text: "not valid json" }] };
+      });
+
+      const result = await handler(sqsEvent({ taskId: "t1", topic: "rust", articleType: "masterclass" }));
+      assert.strictEqual(result.status, "series_researched");
+      assert.strictEqual(result.totalParts, 1);
+    });
+  });
 });

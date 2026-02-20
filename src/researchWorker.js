@@ -15,8 +15,9 @@
  * the message — losing the task forever.
  */
 
-const { GetCommand } = require("@aws-sdk/lib-dynamodb");
+const { GetCommand, PutCommand } = require("@aws-sdk/lib-dynamodb");
 const { PutObjectCommand } = require("@aws-sdk/client-s3");
+const { randomUUID } = require("crypto");
 const { getDocClient, getS3Client, getAnthropicApiKey, updateTaskStatus, parseSqsMessage, sendSqsMessage, getKnownCategories } = require("./lib/shared-utils");
 
 module.exports.handler = async (event) => {
@@ -300,6 +301,146 @@ ${researchContent.slice(0, 3000)}`;
     }
 
     console.log(`Task ${taskId} category resolved: ${resolvedCategory} (isNew: ${isNewCategory})`);
+
+    // --- Masterclass series fan-out ---
+    // For masterclass articles, generate a series outline and create child tasks (one per part).
+    // The parent task tracks the series; each child flows through the normal write→edit→SEO pipeline.
+    // The publishWorker collects all children when they're all ready and creates one PR.
+    if (resolvedArticleType === "masterclass") {
+      // Generate series outline: seriesTitle, seriesSlug, parts array
+      const outlineMessage = await anthropicInstance.messages.create({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1024,
+        system: `You are a curriculum designer for a technical blog. Given research on a topic, produce a series outline for a masterclass learning series.
+
+Rules:
+- 3–6 parts total. Choose the count that best fits the topic's natural scope — don't pad or compress.
+- Each part should be a focused, standalone 800–1500 word post that builds on previous parts.
+- Parts must form a logical learning arc: foundations first, then intermediate, then advanced/synthesis.
+- seriesSlug: lowercase, hyphenated, max 30 chars (e.g. "rust-ownership", "docker-networking")
+- partScope: 2–4 sentences describing what THIS part covers and what the reader will understand after reading it. Be specific — the writer will use this as their brief.
+- Respond with ONLY valid JSON — no markdown, no explanation.`,
+        messages: [{
+          role: "user",
+          content: `Topic: ${topic}\n\nResearch summary:\n${researchContent.slice(0, 4000)}\n\nRespond with ONLY:\n{\n  "seriesTitle": "...",\n  "seriesSlug": "...",\n  "parts": [\n    { "part": 1, "partTitle": "...", "partScope": "..." },\n    ...\n  ]\n}`
+        }]
+      });
+
+      const outlineTextBlock = outlineMessage.content.find(b => b.type === "text");
+      let outline = null;
+      if (outlineTextBlock) {
+        try {
+          outline = JSON.parse(outlineTextBlock.text.trim());
+        } catch {
+          console.warn(`Task ${taskId} series outline JSON parse failed, falling back to single-part`);
+        }
+      }
+
+      // Validate outline shape — fall back to a single-part series if malformed
+      const SERIES_SLUG_RE = /^[a-z][a-z0-9-]{0,29}$/;
+      const isValidOutline = outline &&
+        typeof outline.seriesTitle === "string" &&
+        typeof outline.seriesSlug === "string" &&
+        SERIES_SLUG_RE.test(outline.seriesSlug) &&
+        Array.isArray(outline.parts) &&
+        outline.parts.length >= 1 &&
+        outline.parts.length <= 6;
+
+      const parts = isValidOutline ? outline.parts : [{ part: 1, partTitle: topic, partScope: "" }];
+      const seriesTitle = isValidOutline ? outline.seriesTitle : topic;
+      const seriesSlug = isValidOutline ? outline.seriesSlug : `masterclass-${taskId.slice(0, 8)}`;
+      const totalParts = parts.length;
+
+      console.log(`Task ${taskId} masterclass series: "${seriesTitle}" — ${totalParts} parts (slug: ${seriesSlug})`);
+
+      // Update parent task to series_researched
+      const parentFields = {
+        s3Key,
+        researchedAt: new Date().toISOString(),
+        category: resolvedCategory,
+        isNewCategory,
+        articleType: resolvedArticleType,
+        articleTypeInferred,
+        seriesTitle,
+        seriesSlug,
+        totalParts,
+      };
+      if (newCategoryColor) parentFields.newCategoryColor = newCategoryColor;
+      if (resolvedCategoryDescription) parentFields.categoryDescription = resolvedCategoryDescription;
+      await updateTaskStatus(taskId, "series_researched", parentFields);
+
+      // Create child tasks and enqueue write jobs
+      const docClient = getDocClient();
+      const now = new Date().toISOString();
+      const childTaskIds = [];
+
+      for (const partDef of parts) {
+        const childTaskId = randomUUID();
+        childTaskIds.push(childTaskId);
+
+        // Save per-part research to S3: shared research + part scope injected at top
+        const partResearchContent = partDef.partScope
+          ? `## Part ${partDef.part} Scope\n\n${partDef.partScope}\n\n---\n\n${researchContent}`
+          : researchContent;
+        const partS3Key = `research/${childTaskId}.md`;
+        await s3Client.send(
+          new PutObjectCommand({
+            Bucket: process.env.BUCKET_NAME,
+            Key: partS3Key,
+            Body: partResearchContent,
+            ContentType: "text/markdown"
+          })
+        );
+
+        // Create child task record
+        await docClient.send(
+          new PutCommand({
+            TableName: process.env.TABLE_NAME,
+            Item: {
+              taskId: childTaskId,
+              parentTaskId: taskId,
+              status: "researched",
+              topic,
+              part: partDef.part,
+              partTitle: partDef.partTitle || `Part ${partDef.part}`,
+              partScope: partDef.partScope || "",
+              seriesTitle,
+              seriesSlug,
+              totalParts,
+              articleType: "masterclass",
+              articleTypeInferred: false,
+              category: resolvedCategory,
+              isNewCategory: partDef.part === 1 ? isNewCategory : false, // only first part triggers new-category site files
+              ...(partDef.part === 1 && newCategoryColor ? { newCategoryColor } : {}),
+              ...(partDef.part === 1 && resolvedCategoryDescription ? { categoryDescription: resolvedCategoryDescription } : {}),
+              s3Key: partS3Key,
+              createdAt: now,
+              updatedAt: now,
+            }
+          })
+        );
+
+        // Enqueue write job for this part
+        try {
+          if (!process.env.WRITE_QUEUE_URL) {
+            console.error(`WRITE_QUEUE_URL not set — skipping write enqueue for child task ${childTaskId}`);
+          } else {
+            await sendSqsMessage(process.env.WRITE_QUEUE_URL, {
+              taskId: childTaskId,
+              category: resolvedCategory,
+              articleType: "masterclass"
+            });
+            console.log(`Enqueued write job for part ${partDef.part}/${totalParts}: ${childTaskId}`);
+          }
+        } catch (enqueueErr) {
+          console.error(`Research saved but failed to enqueue write job for child ${childTaskId}:`, enqueueErr);
+        }
+      }
+
+      return { taskId, s3Key, status: "series_researched", seriesSlug, totalParts, childTaskIds };
+    }
+
+    // --- Standard single-post flow ---
 
     // Update task record to researched, persisting category and article type metadata
     const researchedFields = {

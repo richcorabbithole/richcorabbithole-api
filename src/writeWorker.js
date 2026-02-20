@@ -42,12 +42,31 @@ const ARTICLE_TYPE_STRUCTURE = {
 - **Opening**: Frame the scope — what this covers and why it matters to go deep on it.
 - **Depth**: Go further than a knowledge post. Cover the mechanisms, the history, the controversies, the open questions, and the practical implications. This is a reference, not a scan.
 - **Tone**: Still conversational, but willing to slow down and be precise. The reader is investing time — reward that.
-- **Length**: 2000–4000 words of body content.`
+- **Length**: 2000–4000 words of body content.`,
+
+  "masterclass-part": `- **Structure**: This is ONE part of a multi-part series — stay tightly focused on this part's scope. Open by briefly orienting the reader within the series arc (one sentence is enough). Cover this part's topic thoroughly with named ## sections. End with a natural hand-off that sets up the next part (if there is one).
+- **Opening**: Get to this part's topic immediately. One sentence of series context, then dive in.
+- **Depth**: Go deep on this specific scope — don't try to cover the whole series topic. Precision and depth within the scope beats breadth.
+- **Tone**: Conversational but precise. The reader is committed to the series — reward that with substance, not padding.
+- **Length**: 800–1500 words of body content.`
 };
 
-function buildFirstDraftPrompt(category, articleType = "knowledge") {
+function buildFirstDraftPrompt(category, articleType = "knowledge", seriesContext = null) {
   const today = new Date().toISOString().slice(0, 10);
-  const structure = ARTICLE_TYPE_STRUCTURE[articleType] || ARTICLE_TYPE_STRUCTURE["knowledge"];
+
+  // Series parts use a focused per-part structure, not the standalone masterclass structure
+  const effectiveStructureKey = seriesContext ? "masterclass-part" : articleType;
+  const structure = ARTICLE_TYPE_STRUCTURE[effectiveStructureKey] || ARTICLE_TYPE_STRUCTURE["knowledge"];
+
+  // Series-specific frontmatter fields injected when this post is part of a series
+  const seriesFrontmatter = seriesContext ? `- seriesSlug: "${seriesContext.seriesSlug}" (string, in quotes — do not change this value)
+- seriesTitle: "${seriesContext.seriesTitle}" (string, in quotes — do not change this value)
+- part: ${seriesContext.part} (integer — do not change this value)
+- totalParts: ${seriesContext.totalParts} (integer — do not change this value)` : "";
+
+  const seriesNote = seriesContext
+    ? `\nThis post is **Part ${seriesContext.part} of ${seriesContext.totalParts}** in the "${seriesContext.seriesTitle}" series. The research notes include a "Part ${seriesContext.part} Scope" section at the top — use that as your brief for what this specific part should cover.\n`
+    : "";
 
   return `You are a blog writer for richcorabbithole — a blog about going deep on random topics (hyperfixations).
 
@@ -62,8 +81,8 @@ The post MUST start with valid YAML frontmatter fenced by --- lines. The frontma
 - slug: A short 2-4 word URL slug derived from the title (lowercase, hyphenated, max 30 chars, e.g. "roman-aqueducts", "quantum-sleep", "deep-sea-vents"). More memorable than the full title — omit filler words.
 - researchDepth: How deep the research goes, 1-5 integer
 - tags: Array of 3-6 relevant tags (array of strings)
-- sources: Array of source URLs from the research (array of strings)
-
+- sources: Array of source URLs from the research (array of strings)${seriesFrontmatter ? `\n${seriesFrontmatter}` : ""}
+${seriesNote}
 This post is a **${articleType}** article. Structure and write it accordingly:
 ${structure}
 
@@ -73,7 +92,7 @@ Across all article types:
 - **Personal voice for reactions, not stories**: Use "I" for genuine reactions to the research ("This surprised me", "I wasn't expecting this"), but never invent fictional situations.
 - **Show your thinking**: Include the process of discovery, not just polished conclusions. Dead ends, uncertainties, and questions are valuable.
 - **Specific over generic**: Actual examples, real numbers, concrete details from the research.
-- **Balanced tone**: Curious and interested, but not overselling.
+- **Balanced tone**: Curious and interested, not overselling.
 
 CRITICAL: Only write about what's actually in the research. No fictional anecdotes, invented friends, or made-up scenarios.
 
@@ -81,8 +100,14 @@ Do NOT include any text before the opening --- or after the post content.
 Output ONLY the complete markdown file with frontmatter.`;
 }
 
-function buildRevisionPrompt(category, articleType = "knowledge") {
-  const structure = ARTICLE_TYPE_STRUCTURE[articleType] || ARTICLE_TYPE_STRUCTURE["knowledge"];
+function buildRevisionPrompt(category, articleType = "knowledge", seriesContext = null) {
+  const effectiveStructureKey = seriesContext ? "masterclass-part" : articleType;
+  const structure = ARTICLE_TYPE_STRUCTURE[effectiveStructureKey] || ARTICLE_TYPE_STRUCTURE["knowledge"];
+
+  const seriesFrontmatter = seriesContext ? `- seriesSlug: "${seriesContext.seriesSlug}" (string, in quotes — do not change this value)
+- seriesTitle: "${seriesContext.seriesTitle}" (string, in quotes — do not change this value)
+- part: ${seriesContext.part} (integer — do not change this value)
+- totalParts: ${seriesContext.totalParts} (integer — do not change this value)` : "";
 
   return `You are a blog writer for richcorabbithole — a blog about going deep on random topics (hyperfixations).
 
@@ -102,7 +127,7 @@ The post MUST start with valid YAML frontmatter fenced by --- lines. The frontma
 - slug: A short 2-4 word URL slug derived from the title (lowercase, hyphenated, max 30 chars, e.g. "roman-aqueducts", "quantum-sleep", "deep-sea-vents"). Keep from existing draft unless the title changed significantly.
 - researchDepth: How deep the research goes, 1-5 integer
 - tags: Array of 3-6 relevant tags (array of strings)
-- sources: Array of source URLs from the research (array of strings)
+- sources: Array of source URLs from the research (array of strings)${seriesFrontmatter ? `\n${seriesFrontmatter}` : ""}
 
 This post is a **${articleType}** article — maintain its structural conventions during revision:
 ${structure}
@@ -172,13 +197,21 @@ module.exports.handler = async (event) => {
     const resolvedCategory = task.category || "other";
     const resolvedArticleType = task.articleType || "knowledge";
 
+    // Build series context if this is a child task (part of a masterclass series)
+    const seriesContext = task.parentTaskId && task.seriesSlug ? {
+      seriesSlug: task.seriesSlug,
+      seriesTitle: task.seriesTitle,
+      part: task.part,
+      totalParts: task.totalParts,
+    } : null;
+
     // Build the Claude prompt based on flow
     let systemPrompt;
     let userMessage;
     const s3Client = getS3Client();
 
     if (isRevision) {
-      systemPrompt = buildRevisionPrompt(resolvedCategory, resolvedArticleType);
+      systemPrompt = buildRevisionPrompt(resolvedCategory, resolvedArticleType, seriesContext);
 
       // Fetch current draft
       const draftKey = task.draftS3Key || `drafts/${taskId}.md`;
@@ -199,7 +232,7 @@ module.exports.handler = async (event) => {
         })
       );
     } else {
-      systemPrompt = buildFirstDraftPrompt(resolvedCategory, resolvedArticleType);
+      systemPrompt = buildFirstDraftPrompt(resolvedCategory, resolvedArticleType, seriesContext);
       userMessage = `Write a blog post based on this research:\n\n${researchContent}`;
     }
 

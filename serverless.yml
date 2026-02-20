@@ -422,6 +422,8 @@ resources:
             AttributeType: S
           - AttributeName: status
             AttributeType: S
+          - AttributeName: parentTaskId
+            AttributeType: S
         KeySchema:
           - AttributeName: taskId
             KeyType: HASH
@@ -429,6 +431,12 @@ resources:
           - IndexName: status-index
             KeySchema:
               - AttributeName: status
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+          - IndexName: parentTaskId-index
+            KeySchema:
+              - AttributeName: parentTaskId
                 KeyType: HASH
             Projection:
               ProjectionType: ALL

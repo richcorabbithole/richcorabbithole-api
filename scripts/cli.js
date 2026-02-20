@@ -4,20 +4,25 @@
  * Unified CLI for the richcorabbithole pipeline.
  *
  * Subcommands:
- *   publish <topic>           — Run the full pipeline (Research → Write → Edit → SEO → Publish) with live progress
- *   research --topic <topic>  — Trigger a research task via the API (SigV4-signed)
- *   draft <taskId>            — Enqueue a write job for an already-researched task
- *   read-draft <taskId>       — Display the current draft for a task
- *   approve <taskId>          — Mark a published task as approved training data
- *   reject <taskId>           — Mark a published task as rejected (bad data)
+ *   publish <topic>            — Run the full pipeline (Research → Write → Edit → SEO → Publish) with live progress
+ *   research --topic <topic>   — Trigger a research task via the API (SigV4-signed)
+ *   draft <taskId>             — Enqueue a write job for an already-researched task
+ *   read-draft <taskId>        — Display the current draft for a task
+ *   series-status <taskId>     — Show status of all parts in a masterclass series
+ *   approve <taskId>           — Mark a published task as approved training data
+ *   reject <taskId>            — Mark a published task as rejected (bad data)
+ *   delete <taskId>            — Delete a task record and all affiliated S3 objects
  *
  * Usage:
  *   node scripts/cli.js publish "quantum computing" --category tech --stage dev --profile richcorabbithole
+ *   node scripts/cli.js publish "rust ownership" --article-type masterclass --stage dev --profile richcorabbithole
  *   node scripts/cli.js research --topic "serverless architecture" --stage dev --profile richcorabbithole
  *   node scripts/cli.js draft <taskId> --stage dev --profile richcorabbithole
  *   node scripts/cli.js read-draft <taskId> --stage dev --profile richcorabbithole
+ *   node scripts/cli.js series-status <taskId> --stage dev --profile richcorabbithole
  *   node scripts/cli.js approve <taskId> --stage dev --profile richcorabbithole
  *   node scripts/cli.js reject <taskId> --stage dev --profile richcorabbithole
+ *   node scripts/cli.js delete <taskId> --stage dev --profile richcorabbithole
  *
  * Environment Variables:
  *   AWS_PROFILE=richcorabbithole (alternative to --profile flag)
@@ -25,8 +30,8 @@
 
 const { SQSClient, SendMessageCommand, GetQueueUrlCommand } = require("@aws-sdk/client-sqs");
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
-const { DynamoDBDocumentClient, GetCommand, UpdateCommand } = require("@aws-sdk/lib-dynamodb");
-const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
+const { DynamoDBDocumentClient, GetCommand, UpdateCommand, DeleteCommand } = require("@aws-sdk/lib-dynamodb");
+const { S3Client, GetObjectCommand, DeleteObjectCommand } = require("@aws-sdk/client-s3");
 const { fromIni } = require("@aws-sdk/credential-provider-ini");
 
 // --- Argument parsing ---
@@ -36,6 +41,7 @@ const command = args[0];
 const positionalArgs = [];
 let topic = null;
 let category = null;
+let articleType = null;
 let stage = "dev";
 let profile = null;
 
@@ -53,6 +59,13 @@ for (let i = 1; i < args.length; i++) {
       process.exit(1);
     }
     category = args[i + 1];
+    i++;
+  } else if (args[i] === "--article-type") {
+    if (!args[i + 1] || args[i + 1].startsWith("--")) {
+      console.error("Error: --article-type flag requires a value");
+      process.exit(1);
+    }
+    articleType = args[i + 1];
     i++;
   } else if (args[i] === "--stage") {
     if (!args[i + 1] || args[i + 1].startsWith("--")) {
@@ -383,13 +396,21 @@ async function publishCommand(publishTopic) {
   const { Hash } = require("@smithy/hash-node");
   const https = require("https");
 
+  const VALID_ARTICLE_TYPES = ["knowledge", "best-of", "how-to", "masterclass"];
+  if (articleType && !VALID_ARTICLE_TYPES.includes(articleType)) {
+    console.error(`Error: Invalid --article-type "${articleType}". Must be one of: ${VALID_ARTICLE_TYPES.join(", ")}.`);
+    process.exit(1);
+  }
+
   console.log(`🚀 Starting pipeline (${stage})...`);
   console.log(`📝 Topic: ${publishTopic}`);
   if (category) console.log(`🏷️  Category: ${category}`);
+  if (articleType) console.log(`📚 Article type: ${articleType}`);
   console.log();
 
   const requestBody = { topic: publishTopic };
   if (category) requestBody.category = category;
+  if (articleType) requestBody.articleType = articleType;
   const bodyStr = JSON.stringify(requestBody);
 
   const request = new HttpRequest({
@@ -449,18 +470,19 @@ async function publishCommand(publishTopic) {
 
   // Poll DynamoDB for status updates
   const STATUS_LABELS = {
-    pending:      "Starting...",
-    researching:  "Researching...",
-    researched:   "Research complete",
-    writing:      "Writing draft...",
-    drafted:      "Draft complete",
-    editing:      "Editing...",
-    edited:       "Edit complete",
-    optimizing:   "SEO optimization...",
-    ready:        "SEO complete",
-    publishing:   "Creating PR...",
-    published:    "Published!",
-    failed:       null  // handled separately
+    pending:            "Starting...",
+    researching:        "Researching...",
+    researched:         "Research complete",
+    series_researched:  "Series outline ready — writing parts in parallel...",
+    writing:            "Writing draft...",
+    drafted:            "Draft complete",
+    editing:            "Editing...",
+    edited:             "Edit complete",
+    optimizing:         "SEO optimization...",
+    ready:              "SEO complete",
+    publishing:         "Creating PR...",
+    published:          "Published!",
+    failed:             null  // handled separately
   };
 
   const TERMINAL_STATUSES = ["published", "failed"];
@@ -560,6 +582,102 @@ async function publishCommand(publishTopic) {
 }
 
 /**
+ * series-status <taskId> — Show status of all parts in a masterclass series.
+ * taskId can be the parent task ID or any child task ID in the series.
+ *
+ * @param {string} taskId
+ */
+async function seriesStatusCommand(taskId) {
+  if (!taskId) {
+    console.error("Usage: node scripts/cli.js series-status <taskId> [--stage dev] [--profile name]");
+    process.exit(1);
+    return;
+  }
+
+  const { QueryCommand: DynamoQueryCommand } = require("@aws-sdk/lib-dynamodb");
+  const clientConfig = makeClientConfig();
+  const dynamoClient = new DynamoDBClient(clientConfig);
+  const docClient = DynamoDBDocumentClient.from(dynamoClient);
+
+  // Look up the given task to resolve the parent
+  const taskResult = await docClient.send(
+    new GetCommand({ TableName: TABLE_NAME, Key: { taskId } })
+  );
+
+  if (!taskResult.Item) {
+    console.error(`❌ Task not found: ${taskId}`);
+    process.exit(1);
+    return;
+  }
+
+  const task = taskResult.Item;
+
+  // Resolve parent task ID — the given ID may be the parent itself or a child
+  const parentTaskId = task.parentTaskId || taskId;
+
+  // Fetch parent task
+  let parentTask = task.parentTaskId ? null : task;
+  if (!parentTask) {
+    const parentResult = await docClient.send(
+      new GetCommand({ TableName: TABLE_NAME, Key: { taskId: parentTaskId } })
+    );
+    parentTask = parentResult.Item;
+  }
+
+  if (!parentTask) {
+    console.error(`❌ Parent task not found: ${parentTaskId}`);
+    process.exit(1);
+  }
+
+  // Query child tasks via GSI
+  const childResult = await docClient.send(
+    new DynamoQueryCommand({
+      TableName: TABLE_NAME,
+      IndexName: "parentTaskId-index",
+      KeyConditionExpression: "parentTaskId = :pid",
+      ExpressionAttributeValues: { ":pid": parentTaskId },
+    })
+  );
+
+  const children = (childResult.Items || []).sort((a, b) => (a.part || 0) - (b.part || 0));
+
+  console.log(`\n📚 Series: ${parentTask.seriesTitle || "(untitled)"}`);
+  console.log(`   Slug:   ${parentTask.seriesSlug || "(unknown)"}`);
+  console.log(`   Status: ${parentTask.status}`);
+  console.log(`   Parts:  ${children.length} / ${parentTask.totalParts || "?"}`);
+  if (parentTask.prUrl) console.log(`   PR:     ${parentTask.prUrl}`);
+  console.log();
+
+  if (children.length === 0) {
+    console.log("   (no child parts found)");
+    return;
+  }
+
+  const STATUS_ICONS = {
+    researched: "🔬",
+    writing: "✍️ ",
+    drafted: "📝",
+    editing: "✂️ ",
+    edited: "✅",
+    optimizing: "🔍",
+    ready: "🚀",
+    publishing: "📬",
+    published: "✅",
+    failed: "❌",
+  };
+
+  for (const child of children) {
+    const icon = STATUS_ICONS[child.status] || "⏳";
+    const title = child.partTitle || `Part ${child.part}`;
+    console.log(`  ${icon} Part ${child.part}: ${title}`);
+    console.log(`     Status: ${child.status}  |  ID: ${child.taskId}`);
+    if (child.draftS3Key) console.log(`     Draft:  ${child.draftS3Key}`);
+    if (child.finalS3Key) console.log(`     Final:  ${child.finalS3Key}`);
+  }
+  console.log();
+}
+
+/**
  * approve <taskId> / reject <taskId> — Set the approval field on a task record.
  *
  * @param {string} taskId
@@ -612,6 +730,63 @@ async function setApprovalCommand(taskId, decision) {
   if (task.prUrl) console.log(`   PR:     ${task.prUrl}`);
 }
 
+/**
+ * delete <taskId> — Delete a task record from DynamoDB and all affiliated S3 objects.
+ *
+ * Collects every S3 key stored on the task record (s3Key, draftS3Key, editedS3Key,
+ * finalS3Key), deletes each one, then removes the DynamoDB item.
+ *
+ * @param {string} taskId
+ */
+async function deleteTaskCommand(taskId) {
+  if (!taskId) {
+    console.error("Usage: node scripts/cli.js delete <taskId> [--stage dev] [--profile name]");
+    process.exit(1);
+  }
+
+  const clientConfig = makeClientConfig();
+  const dynamoClient = new DynamoDBClient(clientConfig);
+  const docClient = DynamoDBDocumentClient.from(dynamoClient);
+
+  // Fetch the task to discover which S3 keys exist
+  const taskResult = await docClient.send(
+    new GetCommand({ TableName: TABLE_NAME, Key: { taskId } })
+  );
+
+  if (!taskResult.Item) {
+    console.error(`❌ Task not found: ${taskId}`);
+    process.exit(1);
+    return;
+  }
+
+  const task = taskResult.Item;
+  console.log(`🗑️  Deleting task ${taskId} (status: ${task.status})`);
+  if (task.topic) console.log(`   Topic: ${task.topic}`);
+
+  // Collect all S3 keys present on this task record
+  const s3Keys = [task.s3Key, task.draftS3Key, task.editedS3Key, task.finalS3Key].filter(Boolean);
+
+  // Delete each S3 object
+  const s3Client = new S3Client(clientConfig);
+  for (const key of s3Keys) {
+    await s3Client.send(
+      new DeleteObjectCommand({ Bucket: BUCKET_NAME, Key: key })
+    );
+    console.log(`   ✓ Deleted S3 object: ${key}`);
+  }
+
+  if (s3Keys.length === 0) {
+    console.log(`   (no S3 objects found)`);
+  }
+
+  // Delete the DynamoDB item
+  await docClient.send(
+    new DeleteCommand({ TableName: TABLE_NAME, Key: { taskId } })
+  );
+
+  console.log(`✅ Task ${taskId} deleted`);
+}
+
 // --- Main ---
 
 /**
@@ -624,16 +799,19 @@ async function main() {
   if (!command) {
     console.error("Usage: node scripts/cli.js <command> [options]");
     console.error("\nCommands:");
-    console.error("  publish <topic>           Run the full pipeline with live progress");
-    console.error("  research --topic <topic>  Trigger a research task via the API");
-    console.error("  draft <taskId>            Enqueue a write job for an already-researched task");
-    console.error("  read-draft <taskId>       Display the current draft for a task");
-    console.error("  approve <taskId>          Mark a task as approved training data");
-    console.error("  reject <taskId>           Mark a task as rejected (bad data)");
+    console.error("  publish <topic>            Run the full pipeline with live progress");
+    console.error("  research --topic <topic>   Trigger a research task via the API");
+    console.error("  draft <taskId>             Enqueue a write job for an already-researched task");
+    console.error("  read-draft <taskId>        Display the current draft for a task");
+    console.error("  series-status <taskId>     Show status of all parts in a masterclass series");
+    console.error("  approve <taskId>           Mark a task as approved training data");
+    console.error("  reject <taskId>            Mark a task as rejected (bad data)");
+    console.error("  delete <taskId>            Delete a task and all affiliated S3 objects");
     console.error("\nFlags:");
-    console.error("  --category <cat>    Blog category: tech, science, history, gaming, maker, other");
-    console.error("  --stage <stage>     Target stage: dev or prod (default: dev)");
-    console.error("  --profile <name>    AWS CLI profile for credentials");
+    console.error("  --category <cat>        Blog category: tech, science, history, gaming, maker, other");
+    console.error("  --article-type <type>   Article type: knowledge, best-of, how-to, masterclass");
+    console.error("  --stage <stage>         Target stage: dev or prod (default: dev)");
+    console.error("  --profile <name>        AWS CLI profile for credentials");
     process.exit(1);
   }
 
@@ -651,15 +829,21 @@ async function main() {
       case "read-draft":
         await readDraftCommand(positionalArgs[0]);
         break;
+      case "series-status":
+        await seriesStatusCommand(positionalArgs[0]);
+        break;
       case "approve":
         await setApprovalCommand(positionalArgs[0], "approved");
         break;
       case "reject":
         await setApprovalCommand(positionalArgs[0], "rejected");
         break;
+      case "delete":
+        await deleteTaskCommand(positionalArgs[0]);
+        break;
       default:
         console.error(`Unknown command: ${command}`);
-        console.error("\nAvailable commands: publish, research, draft, read-draft, approve, reject");
+        console.error("\nAvailable commands: publish, research, draft, read-draft, series-status, approve, reject, delete");
         process.exit(1);
     }
   } catch (error) {
@@ -684,5 +868,5 @@ main();
 
 // Exported for testing only — not used when the script runs as a CLI entrypoint.
 if (typeof module !== "undefined") {
-  module.exports = { setApprovalCommand };
+  module.exports = { setApprovalCommand, deleteTaskCommand, seriesStatusCommand };
 }
