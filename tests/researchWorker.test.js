@@ -500,5 +500,49 @@ describe("researchWorker handler", () => {
       assert.strictEqual(putCalls.length, 3, "Expected 3 children from stored outline");
       assert.strictEqual(putCalls[0].arguments[0].params.Item.partTitle, "What is Ownership?");
     });
+
+    it("skips enqueue for child tasks that already exist (conditional put — prevents overwriting progress)", async () => {
+      // Simulate a mid-loop crash retry where part 1's child already progressed to "writing".
+      // The conditional PutCommand for part 1 throws ConditionalCheckFailedException,
+      // which the handler catches and skips the write-job enqueue for that part —
+      // preserving existing pipeline progress and not restarting the part.
+      const { createHash } = require("crypto");
+      const part1Id = createHash("sha256").update("t1:part:1").digest("hex").slice(0, 36);
+
+      mockSend.mock.mockImplementation(async (cmd) => {
+        if (cmd.name === "GetCommand") {
+          return { Item: { taskId: "t1", status: "pending" } };
+        }
+        if (cmd.name === "GetSecretValueCommand") {
+          return { SecretString: "sk-ant-test-key" };
+        }
+        if (cmd.name === "PutCommand") {
+          // Simulate part 1 already existing (has progressed since first attempt)
+          if (cmd.params?.Item?.taskId === part1Id) {
+            const err = new Error("The conditional request failed");
+            err.name = "ConditionalCheckFailedException";
+            throw err;
+          }
+        }
+        return {};
+      });
+
+      const result = await handler(sqsEvent({ taskId: "t1", topic: "rust ownership", articleType: "masterclass" }));
+      assert.strictEqual(result.status, "series_researched");
+      assert.strictEqual(result.totalParts, 3);
+
+      // All 3 PutCommands are attempted (one per part), but part 1's is rejected by DynamoDB
+      // and the handler catches it — only parts 2 and 3 succeed.
+      const putCalls = mockSend.mock.calls.filter(c => c.arguments[0].name === "PutCommand");
+      assert.strictEqual(putCalls.length, 3, "All 3 PutCommands attempted (part 1 rejected by conditional check)");
+      const part1PutAttempted = putCalls.some(c => c.arguments[0].params?.Item?.taskId === part1Id);
+      assert.ok(part1PutAttempted, "Part 1 PutCommand was attempted (but rejected by DynamoDB conditional)");
+
+      // Critical: only 2 write jobs enqueued — part 1 was skipped after ConditionalCheckFailedException
+      const sqsCalls = mockSend.mock.calls.filter(c => c.arguments[0].name === "SendMessageCommand");
+      assert.strictEqual(sqsCalls.length, 2, "Only 2 write jobs enqueued — part 1 already progressed, must not be re-queued");
+      const enqueuedIds = sqsCalls.map(c => JSON.parse(c.arguments[0].params.MessageBody).taskId);
+      assert.ok(!enqueuedIds.includes(part1Id), "Part 1's write job must NOT be re-enqueued");
+    });
   });
 });

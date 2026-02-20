@@ -427,33 +427,50 @@ Rules:
           })
         );
 
-        // Create child task record
-        await docClient.send(
-          new PutCommand({
-            TableName: process.env.TABLE_NAME,
-            Item: {
-              taskId: childTaskId,
-              parentTaskId: taskId,
-              status: "researched",
-              topic,
-              part: partDef.part,
-              partTitle: partDef.partTitle || `Part ${partDef.part}`,
-              partScope: partDef.partScope || "",
-              seriesTitle,
-              seriesSlug,
-              totalParts,
-              articleType: "masterclass",
-              articleTypeInferred: false,
-              category: resolvedCategory,
-              isNewCategory: partDef.part === 1 ? isNewCategory : false, // only first part triggers new-category site files
-              ...(partDef.part === 1 && newCategoryColor ? { newCategoryColor } : {}),
-              ...(partDef.part === 1 && resolvedCategoryDescription ? { categoryDescription: resolvedCategoryDescription } : {}),
-              s3Key: partS3Key,
-              createdAt: now,
-              updatedAt: now,
-            }
-          })
-        );
+        // Create child task record — conditional on the item not already existing.
+        // On an SQS retry after a mid-loop crash, the write job for this part may
+        // already have been picked up and the child may have progressed (e.g. to
+        // "writing" or "drafted"). An unconditional PutCommand would overwrite that
+        // progress back to "researched" and re-queue the write job (below), causing
+        // duplicate pipeline runs. attribute_not_exists(taskId) makes the write a
+        // no-op if the item exists, preserving any progress already made.
+        try {
+          await docClient.send(
+            new PutCommand({
+              TableName: process.env.TABLE_NAME,
+              ConditionExpression: "attribute_not_exists(taskId)",
+              Item: {
+                taskId: childTaskId,
+                parentTaskId: taskId,
+                status: "researched",
+                topic,
+                part: partDef.part,
+                partTitle: partDef.partTitle || `Part ${partDef.part}`,
+                partScope: partDef.partScope || "",
+                seriesTitle,
+                seriesSlug,
+                totalParts,
+                articleType: "masterclass",
+                articleTypeInferred: false,
+                category: resolvedCategory,
+                isNewCategory: partDef.part === 1 ? isNewCategory : false, // only first part triggers new-category site files
+                ...(partDef.part === 1 && newCategoryColor ? { newCategoryColor } : {}),
+                ...(partDef.part === 1 && resolvedCategoryDescription ? { categoryDescription: resolvedCategoryDescription } : {}),
+                s3Key: partS3Key,
+                createdAt: now,
+                updatedAt: now,
+              }
+            })
+          );
+        } catch (putErr) {
+          if (putErr.name === "ConditionalCheckFailedException") {
+            // Child already exists (created on a previous attempt) — skip without
+            // re-enqueuing the write job so we don't duplicate pipeline work.
+            console.log(`Child task ${childTaskId} (part ${partDef.part}) already exists — skipping create and enqueue`);
+            continue;
+          }
+          throw putErr;
+        }
 
         // Enqueue write job for this part
         try {
