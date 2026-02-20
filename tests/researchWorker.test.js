@@ -68,19 +68,40 @@ describe("researchWorker handler", () => {
   // --- Idempotency ---
 
   describe("idempotency", () => {
-    it("skips already-researched tasks", async () => {
+    for (const doneStatus of ["researched", "series_researched", "publishing", "published"]) {
+      it(`skips tasks with status "${doneStatus}"`, async () => {
+        mockSend.mock.mockImplementation(async (cmd) => {
+          if (cmd.name === "GetCommand") {
+            return { Item: { taskId: "t1", status: doneStatus } };
+          }
+          return {};
+        });
+
+        const result = await handler(sqsEvent({ taskId: "t1", topic: "test" }));
+
+        assert.strictEqual(result.status, "already_processed");
+        // Claude should NOT have been called
+        assert.strictEqual(mockCreate.mock.calls.length, 0);
+      });
+    }
+
+    it("re-runs failed tasks (not in done-statuses list)", async () => {
+      // "failed" is intentionally excluded so SQS retries can attempt recovery
       mockSend.mock.mockImplementation(async (cmd) => {
         if (cmd.name === "GetCommand") {
-          return { Item: { taskId: "t1", status: "researched" } };
+          return { Item: { taskId: "t1", status: "failed" } };
+        }
+        if (cmd.name === "GetSecretValueCommand") {
+          return { SecretString: "sk-ant-test-key" };
         }
         return {};
       });
 
       const result = await handler(sqsEvent({ taskId: "t1", topic: "test" }));
 
-      assert.strictEqual(result.status, "already_researched");
-      // Claude should NOT have been called
-      assert.strictEqual(mockCreate.mock.calls.length, 0);
+      // Should re-run the pipeline and produce a normal result
+      assert.strictEqual(result.status, "researched");
+      assert.ok(mockCreate.mock.calls.length > 0, "Claude should have been called for recovery");
     });
 
     it("processes pending task normally", async () => {
@@ -355,6 +376,29 @@ describe("researchWorker handler", () => {
       const result = await handler(sqsEvent({ taskId: "t1", topic: "rust", articleType: "masterclass" }));
       assert.strictEqual(result.status, "series_researched");
       assert.strictEqual(result.totalParts, 1);
+    });
+
+    it("generates deterministic child task IDs (stable across retries)", async () => {
+      const { createHash } = require("crypto");
+      await handler(sqsEvent({ taskId: "t1", topic: "rust ownership", articleType: "masterclass" }));
+
+      const putCalls = mockSend.mock.calls.filter(c => c.arguments[0].name === "PutCommand");
+      assert.strictEqual(putCalls.length, 3);
+
+      // Each child ID must equal sha256("t1:part:<N>").slice(0, 36)
+      for (let i = 0; i < 3; i++) {
+        const expectedId = createHash("sha256")
+          .update(`t1:part:${i + 1}`)
+          .digest("hex")
+          .slice(0, 36);
+        const actualId = putCalls[i].arguments[0].params.Item.taskId;
+        assert.strictEqual(actualId, expectedId, `Part ${i + 1} child ID should be deterministic`);
+
+        // S3 key must use the same deterministic ID
+        const s3Puts = mockSend.mock.calls.filter(c => c.arguments[0].name === "PutObjectCommand");
+        const partS3Put = s3Puts[i + 1]; // index 0 is the shared research; parts start at index 1
+        assert.strictEqual(partS3Put.arguments[0].params.Key, `research/${expectedId}.md`);
+      }
     });
   });
 });

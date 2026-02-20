@@ -17,7 +17,7 @@
 
 const { GetCommand, PutCommand } = require("@aws-sdk/lib-dynamodb");
 const { PutObjectCommand } = require("@aws-sdk/client-s3");
-const { randomUUID } = require("crypto");
+const { createHash } = require("crypto");
 const { getDocClient, getS3Client, getAnthropicApiKey, updateTaskStatus, parseSqsMessage, sendSqsMessage, getKnownCategories } = require("./lib/shared-utils");
 
 module.exports.handler = async (event) => {
@@ -48,9 +48,13 @@ module.exports.handler = async (event) => {
       })
     );
 
-    if (existing.Item && existing.Item.status === "researched") {
-      console.log(`Task ${taskId} already researched, skipping`);
-      return { taskId, status: "already_researched" };
+    // Treat any post-research status as already done — guards against SQS at-least-once
+    // delivery re-running the full pipeline (including the masterclass fan-out) on retry.
+    // "failed" is intentionally excluded: failed tasks should be retried by SQS for recovery.
+    const ALREADY_DONE_STATUSES = ["researched", "series_researched", "publishing", "published"];
+    if (existing.Item && ALREADY_DONE_STATUSES.includes(existing.Item.status)) {
+      console.log(`Task ${taskId} already processed (status: ${existing.Item.status}), skipping`);
+      return { taskId, status: "already_processed" };
     }
 
     // Update the task record to researching
@@ -375,7 +379,13 @@ Rules:
       const childTaskIds = [];
 
       for (const partDef of parts) {
-        const childTaskId = randomUUID();
+        // Deterministic child ID: stable across retries for the same parent+part,
+        // so a mid-loop crash followed by an SQS retry writes the same S3 key and
+        // DynamoDB item (idempotent overwrite) rather than creating duplicate children.
+        const childTaskId = createHash("sha256")
+          .update(`${taskId}:part:${partDef.part}`)
+          .digest("hex")
+          .slice(0, 36);
         childTaskIds.push(childTaskId);
 
         // Save per-part research to S3: shared research + part scope injected at top
